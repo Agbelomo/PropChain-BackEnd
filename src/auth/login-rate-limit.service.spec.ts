@@ -1,4 +1,5 @@
 import { LoginRateLimitService } from './login-rate-limit.service';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../database/prisma.service';
 
 interface MockPrisma {
@@ -8,6 +9,15 @@ interface MockPrisma {
     create: jest.Mock;
     updateMany: jest.Mock;
   };
+}
+
+function makeConfigService(overrides: Record<string, string | undefined> = {}): ConfigService {
+  const values: Record<string, string | undefined> = {
+    LOGIN_MAX_ATTEMPTS: undefined,
+    LOGIN_LOCKOUT_MINUTES: undefined,
+    ...overrides,
+  };
+  return { get: jest.fn((key: string) => values[key]) } as unknown as ConfigService;
 }
 
 describe('LoginRateLimitService', () => {
@@ -26,7 +36,10 @@ describe('LoginRateLimitService', () => {
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
     };
-    service = new LoginRateLimitService(mockPrisma as unknown as PrismaService);
+    service = new LoginRateLimitService(
+      mockPrisma as unknown as PrismaService,
+      makeConfigService(),
+    );
   });
 
   describe('isAccountLocked', () => {
@@ -62,6 +75,47 @@ describe('LoginRateLimitService', () => {
           data: expect.objectContaining({ lockedOut: true, unlockAt: expect.any(Date) }),
         }),
       );
+    });
+  });
+
+  describe('env-driven lockout config (#1190)', () => {
+    it('locks after LOGIN_MAX_ATTEMPTS when configured', async () => {
+      service = new LoginRateLimitService(
+        mockPrisma as unknown as PrismaService,
+        makeConfigService({ LOGIN_MAX_ATTEMPTS: '3' }),
+      );
+      mockPrisma.loginAttempt.count.mockResolvedValue(2); // 2 + 1 = 3
+      expect(await service.recordFailedAttempt(email, ip)).toBe(true);
+    });
+
+    it('does not lock below the configured LOGIN_MAX_ATTEMPTS', async () => {
+      service = new LoginRateLimitService(
+        mockPrisma as unknown as PrismaService,
+        makeConfigService({ LOGIN_MAX_ATTEMPTS: '3' }),
+      );
+      mockPrisma.loginAttempt.count.mockResolvedValue(1); // 1 + 1 = 2 < 3
+      expect(await service.recordFailedAttempt(email, ip)).toBe(false);
+    });
+
+    it('applies the configured LOGIN_LOCKOUT_MINUTES lockout window', async () => {
+      service = new LoginRateLimitService(
+        mockPrisma as unknown as PrismaService,
+        makeConfigService({ LOGIN_LOCKOUT_MINUTES: '5' }),
+      );
+      mockPrisma.loginAttempt.count.mockResolvedValue(4);
+      await service.recordFailedAttempt(email, ip);
+      const unlockAt = mockPrisma.loginAttempt.create.mock.calls[0][0].data.unlockAt;
+      const deltaMinutes = Math.round((unlockAt.getTime() - Date.now()) / (60 * 1000));
+      expect(deltaMinutes).toBe(5);
+    });
+
+    it('falls back to defaults for invalid values', async () => {
+      service = new LoginRateLimitService(
+        mockPrisma as unknown as PrismaService,
+        makeConfigService({ LOGIN_MAX_ATTEMPTS: 'abc', LOGIN_LOCKOUT_MINUTES: '-1' }),
+      );
+      mockPrisma.loginAttempt.count.mockResolvedValue(4); // default threshold 5
+      expect(await service.recordFailedAttempt(email, ip)).toBe(true);
     });
   });
 

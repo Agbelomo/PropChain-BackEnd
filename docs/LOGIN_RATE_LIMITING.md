@@ -303,16 +303,14 @@ describe('Login Rate Limiting', () => {
 
 ## Configuration
 
-The rate limiting configuration can be adjusted in `login-rate-limit.service.ts`:
+Lockout behavior is driven by environment variables (read via `ConfigService`), with safe defaults:
 
-```typescript
-this.config = {
-  maxAttempts: 5,              // Number of attempts before lockout
-  lockoutDurationMinutes: 15,  // Lockout duration in minutes
-};
-```
+| Variable | Default | Description |
+| --- | --- | --- |
+| `LOGIN_MAX_ATTEMPTS` | `5` | Failed attempts within the window before the account locks. |
+| `LOGIN_LOCKOUT_MINUTES` | `30` | Lockout window / duration in minutes. |
 
-Future enhancement: Move these to environment variables for easier configuration.
+Invalid values (non-numeric, zero, or negative) fall back to the defaults with a logged warning.
 
 ## Monitoring and Maintenance
 
@@ -346,7 +344,7 @@ Proper indexes are created for efficient queries:
 3. **Email Notifications**: Send email alerts when account is locked
 4. **CAPTCHA Integration**: Require CAPTCHA after 3 failed attempts
 5. **Admin Dashboard**: View and manage locked accounts
-6. **Environment Variables**: Make max attempts and duration configurable
+6. ~~**Environment Variables**: Make max attempts and duration configurable~~ (done — `LOGIN_MAX_ATTEMPTS`, `LOGIN_LOCKOUT_MINUTES`)
 7. **Redis Integration**: Use Redis for distributed rate limiting in multi-instance deployments
 
 ## Acceptance Criteria Met
