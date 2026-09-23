@@ -1,4 +1,4 @@
-import { UnauthorizedException } from '@nestjs/common';
+import { ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { AuthService } from './auth.service';
@@ -56,7 +56,9 @@ describe('AuthService – CAPTCHA failure lockout', () => {
         JWT_REFRESH_EXPIRES_IN: '7d',
         BCRYPT_ROUNDS: '10',
         CAPTCHA_THRESHOLD: '3',
-        // No RECAPTCHA_SECRET → verifyCaptcha bypassed (returns true) unless we mock fetch
+        // No RECAPTCHA_SECRET and no CAPTCHA_BYPASS in the default harness →
+        // verifyCaptcha throws ServiceUnavailableException (#1194). Tests that
+        // need it to return false set a secret and mock fetch below.
       };
       return config[key];
     }),
@@ -102,6 +104,19 @@ describe('AuthService – CAPTCHA failure lockout', () => {
       json: async () => ({ success: false, 'error-codes': ['invalid-input-response'] }),
     }) as unknown as typeof fetch;
   }
+
+  describe('missing RECAPTCHA_SECRET (#1194)', () => {
+    it('throws a stable ServiceUnavailableException when the secret is absent and CAPTCHA is not bypassed', async () => {
+      // Default harness config has no RECAPTCHA_SECRET and no CAPTCHA_BYPASS,
+      // so CAPTCHA is required.
+      await expect(service['verifyCaptcha']('token')).rejects.toThrow(
+        ServiceUnavailableException,
+      );
+      await expect(service['verifyCaptcha']('token')).rejects.toMatchObject({
+        response: { error: 'CAPTCHA_SERVICE_UNAVAILABLE' },
+      });
+    });
+  });
 
   describe('CAPTCHA failure', () => {
     beforeEach(() => {

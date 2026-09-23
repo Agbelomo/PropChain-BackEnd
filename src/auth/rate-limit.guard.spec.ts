@@ -1,5 +1,6 @@
 import { RateLimitGuard } from './guards/rate-limit.guard';
 import { RateLimitService } from './rate-limit.service';
+import { createSha256 } from './security.utils';
 import { ExecutionContext, HttpException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 
@@ -95,6 +96,49 @@ describe('RateLimitGuard - auth/signup endpoints', () => {
   });
 });
 
+describe('RateLimitGuard – IPv4 header spoofing (#1195)', () => {
+  let guard: RateLimitGuard;
+  let rateLimitService: jest.Mocked<RateLimitService>;
+
+  const notExceeded = { limit: 5, remaining: 4, reset: 9999999999, isExceeded: false };
+
+  beforeEach(() => {
+    delete process.env.TRUST_PROXY;
+    rateLimitService = {
+      checkIpRateLimit: jest.fn().mockResolvedValue(notExceeded),
+      checkUserRateLimit: jest.fn().mockResolvedValue(notExceeded),
+      checkUserIpRateLimit: jest.fn().mockResolvedValue(notExceeded),
+      checkEndpointRateLimit: jest.fn().mockResolvedValue({ ...notExceeded, limit: 0 }),
+      getHeaders: jest.fn().mockReturnValue({}),
+    } as unknown as jest.Mocked<RateLimitService>;
+    const reflector = new Reflector();
+    jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue(false);
+    guard = new RateLimitGuard(reflector, rateLimitService);
+  });
+
+  it('ignores a spoofed x-forwarded-for header when trust proxy is not set', async () => {
+    // Client sends X-Forwarded-For: <victim IP> but TRUST_PROXY is off →
+    // the guard must bucket by the actual connection address.
+    const ctx = makeContext({
+      headers: { 'x-forwarded-for': '203.0.113.200' },
+      ip: '1.2.3.4',
+    });
+    await expect(guard.canActivate(ctx)).resolves.toBe(true);
+    expect(rateLimitService.checkIpRateLimit).toHaveBeenCalledWith(createSha256('1.2.3.4'));
+  });
+
+  it('ignores a malformed x-forwarded-for entry when trust proxy is on', async () => {
+    process.env.TRUST_PROXY = '1';
+    const ctx = makeContext({
+      headers: { 'x-forwarded-for': '<script>evil()</script>, 1.2.3.4 ' },
+      ip: '1.2.3.4',
+    });
+    await expect(guard.canActivate(ctx)).resolves.toBe(true);
+    // Only the valid right-most entry survives sanitisation.
+    expect(rateLimitService.checkIpRateLimit).toHaveBeenCalledWith(createSha256('1.2.3.4'));
+  });
+});
+
 describe('RateLimitGuard - authenticated tier-based limiting', () => {
   let guard: RateLimitGuard;
   let rateLimitService: jest.Mocked<RateLimitService>;
@@ -124,7 +168,7 @@ describe('RateLimitGuard - authenticated tier-based limiting', () => {
     });
     await expect(guard.canActivate(ctx)).resolves.toBe(true);
     expect(rateLimitService.checkUserRateLimit).toHaveBeenCalledWith('user-1', 'premium');
-    expect(rateLimitService.checkUserIpRateLimit).toHaveBeenCalledWith('user-1', '1.2.3.4');
+    expect(rateLimitService.checkUserIpRateLimit).toHaveBeenCalledWith('user-1', createSha256('1.2.3.4'));
     expect(rateLimitService.checkIpRateLimit).not.toHaveBeenCalled();
   });
 
@@ -136,7 +180,7 @@ describe('RateLimitGuard - authenticated tier-based limiting', () => {
     });
     await expect(guard.canActivate(ctx)).resolves.toBe(true);
     expect(rateLimitService.checkUserRateLimit).not.toHaveBeenCalled();
-    expect(rateLimitService.checkIpRateLimit).toHaveBeenCalledWith('1.2.3.4');
+    expect(rateLimitService.checkIpRateLimit).toHaveBeenCalledWith(createSha256('1.2.3.4'));
   });
 
   it('defaults to the free tier when authUser.tier is missing', async () => {

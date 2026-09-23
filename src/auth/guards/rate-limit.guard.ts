@@ -10,11 +10,28 @@ import {
 import { Reflector } from '@nestjs/core';
 import { Request } from 'express';
 import { RateLimitService } from '../rate-limit.service';
+import { createSha256 } from '../security.utils';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { RATE_LIMIT_HEADERS } from '../rate-limit.config';
 
 export const RATE_LIMIT_SKIP_KEY = 'rate-limit-skip';
 export const RATE_LIMIT_CUSTOM_KEY = 'rate-limit-custom';
+
+/**
+ * Trim and validate a single `x-forwarded-for` entry. Rejects anything that is
+ * not a plausible IP literal (v4 or v6) so header junk can never be embedded
+ * in rate-limit keys.
+ */
+export function sanitizeIpEntry(entry: string): string | null {
+  if (!entry) return null;
+  const trimmed = entry.trim();
+  if (!trimmed) return null;
+  return /^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}|[0-9a-fA-F:]+)$/.test(
+    trimmed,
+  )
+    ? trimmed
+    : null;
+}
 
 /**
  * Decorator to skip rate limiting for a route
@@ -156,17 +173,56 @@ export class RateLimitGuard implements CanActivate {
   }
 
   /**
-   * Extract client IP from request
+   * Extract client IP from request.
+   *
+   * #1195 – A raw `x-forwarded-for` header is NEVER trusted directly: without a
+   * configured reverse proxy any client can send `X-Forwarded-For: <victimIP>`
+   * and rotate the per-IP rate-limit buckets. The header is only consulted
+   * when TRUST_PROXY is enabled (app.set('trust proxy', …) in main.ts), and the
+   * returned value is a SHA-256 hash so attacker-controlled header bytes never
+   * reach the rate-limit key store verbatim.
    */
   private getClientIp(request: Request): string {
+    const rawIp = this.resolveRawClientIp(request);
+    return rawIp === 'unknown' ? rawIp : createSha256(rawIp);
+  }
+
+  private resolveRawClientIp(request: Request): string {
+    const trustProxy = this.isTrustProxyEnabled();
+
+    if (!trustProxy) {
+      // Ignore x-forwarded-for entirely. Express's request.ip is the direct
+      // connection address from the socket when trust proxy is not set.
+      return this.fromSocket(request);
+    }
+
     const forwardedFor = request.headers['x-forwarded-for'];
     const forwardedForStr = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
+
+    if (forwardedForStr) {
+      // Right-most entry is the hop closest to us when behind a trusted proxy.
+      const candidates = forwardedForStr.split(',').map((s) => sanitizeIpEntry(s)).filter(Boolean);
+      const nearest = candidates[candidates.length - 1];
+      if (nearest) {
+        return nearest;
+      }
+    }
+
+    return this.fromSocket(request);
+  }
+
+  private fromSocket(request: Request): string {
     return (
-      forwardedForStr?.split(',')[0].trim() ||
+      request.ip ||
       request.connection?.remoteAddress ||
       request.socket?.remoteAddress ||
-      request.ip ||
       'unknown'
     );
+  }
+
+  private isTrustProxyEnabled(): boolean {
+    const value = process.env.TRUST_PROXY;
+    if (value === undefined || value === '') return false;
+    return !['false', '0', 'none'].includes(value.trim().toLowerCase());
   }
 }
