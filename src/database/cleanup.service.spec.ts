@@ -51,13 +51,12 @@ describe('CleanupService', () => {
 
   it('deletes old SearchAnalytics and SearchHistory rows and returns their counts', async () => {
     process.env.CLEANUP_SEARCH_RETENTION_DAYS = '30';
-    (prisma.searchAnalytics.findMany as jest.Mock).mockResolvedValueOnce([{ id: 'a1' }]);
-    (prisma.searchAnalytics.deleteMany as jest.Mock).mockResolvedValueOnce({ count: 1 });
-    (prisma.searchHistory.findMany as jest.Mock).mockResolvedValueOnce([
-      { id: 'h1' },
-      { id: 'h2' },
-    ]);
-    (prisma.searchHistory.deleteMany as jest.Mock).mockResolvedValueOnce({ count: 2 });
+    const searchAnalytics = prisma.searchAnalytics!;
+    const searchHistory = prisma.searchHistory!;
+    (searchAnalytics.findMany as jest.Mock).mockResolvedValueOnce([{ id: 'a1' }]);
+    (searchAnalytics.deleteMany as jest.Mock).mockResolvedValueOnce({ count: 1 });
+    (searchHistory.findMany as jest.Mock).mockResolvedValueOnce([{ id: 'h1' }, { id: 'h2' }]);
+    (searchHistory.deleteMany as jest.Mock).mockResolvedValueOnce({ count: 2 });
 
     const summary = await service.performCleanup();
 
