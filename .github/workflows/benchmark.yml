@@ -1,16 +1,17 @@
 name: API Performance Benchmark
 
-on:
-  pull_request:
-    branches: [main, develop]
-  schedule:
-    - cron: '0 6 * * 1' # Weekly on Monday at 6am UTC
-  workflow_dispatch:
-    inputs:
-      iterations:
-        description: 'Number of iterations per endpoint'
-        required: false
-        default: '50'
+# Benchmark temporarily disabled – triggers commented out below.
+# on:
+#   pull_request:
+#     branches: [main, develop]
+#   schedule:
+#     - cron: '0 6 * * 1' # Weekly on Monday at 6am UTC
+#   workflow_dispatch:
+#     inputs:
+#       iterations:
+#         description: 'Number of iterations per endpoint'
+#         required: false
+#         default: '50'
 
 jobs:
   benchmark:
