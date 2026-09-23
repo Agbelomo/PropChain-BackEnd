@@ -11,6 +11,8 @@ import { UserImportService } from './user-import.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { AuthUserPayload } from '../auth/types/auth-user.type';
 import { UserRole } from '../types/prisma.types';
 
 @Controller('users/import')
@@ -23,6 +25,7 @@ export class UserImportController {
   @UseInterceptors(FileInterceptor('file'))
   async importCsv(
     @UploadedFile() file: { originalname: string; mimetype: string; buffer: Buffer },
+    @CurrentUser() user: AuthUserPayload,
   ) {
     if (!file) {
       throw new BadRequestException('No file uploaded');
@@ -39,6 +42,9 @@ export class UserImportController {
       throw new BadRequestException('Only CSV files are allowed');
     }
 
-    return this.userImportService.importFromCsv(file.buffer);
+    return this.userImportService.importFromCsv(file.buffer, {
+      id: user.sub,
+      email: user.email,
+    });
   }
 }

@@ -16,6 +16,8 @@ import { RateLimitService } from '../auth/rate-limit.service';
 import { AccountDeletionService } from './account-deletion.service';
 import { DataExportService } from './data-export.service';
 import { I18nModule } from '../i18n/i18n.module';
+import { UserImportController } from './user-import.controller';
+import { UserImportService } from './user-import.service';
 
 @Module({
   imports: [PrismaModule, SessionsModule, I18nModule],
@@ -25,6 +27,7 @@ import { I18nModule } from '../i18n/i18n.module';
     ActivityLogController,
     AdminActivityLogController,
     EmailVerificationController,
+    UserImportController,
   ],
   providers: [
     UsersService,
@@ -35,6 +38,7 @@ import { I18nModule } from '../i18n/i18n.module';
     RateLimitService,
     AccountDeletionService,
     DataExportService,
+    UserImportService,
   ],
   exports: [
     UsersService,
