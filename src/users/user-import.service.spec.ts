@@ -67,7 +67,9 @@ describe('UserImportService – password policy (#1199) and role whitelist (#119
   it('reports every password-policy violation for an invalid row', async () => {
     const { service } = buildHarness();
     // No uppercase, no digit → both violations collected
-    const report = await service.importFromCsv(csvRow('bad@example.com,New,User,lowercasespecial!,'));
+    const report = await service.importFromCsv(
+      csvRow('bad@example.com,New,User,lowercasespecial!,USER,'),
+    );
 
     expect(report.failed).toBe(1);
     expect(report.errors[0].error).toContain('uppercase');
