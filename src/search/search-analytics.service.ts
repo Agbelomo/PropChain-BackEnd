@@ -1,4 +1,6 @@
 import { Injectable } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
+import { PrismaService } from '../database/prisma.service';
 
 import { SearchQuery } from './search.service';
 
@@ -89,31 +91,83 @@ export interface SearchInsights {
 
 @Injectable()
 export class SearchAnalyticsService {
-  constructor() {}
+  constructor(private readonly prisma: PrismaService) {}
 
+  /**
+   * Record a search before it runs (#1184).
+   *
+   * When the user has opted out of search analytics (UserPreferences
+   * `searchAnalyticsOptOut`), no PII-bearing row (SearchAnalytics/SearchHistory)
+   * is written. The aggregated PopularSearch counter still updates so product
+   * quality signals are preserved without per-user tracking.
+   */
   async recordSearch(userId: string, searchQuery: SearchQuery): Promise<string> {
     const queryId = `search_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
 
-    void userId;
-    void searchQuery;
+    const prefs = await this.prisma.userPreferences.findUnique({
+      where: { userId },
+    });
+    const optedOut = prefs?.searchAnalyticsOptOut === true;
+
+    // Aggregated, non-personal analytics are safe to keep for product quality.
+    const queryText = searchQuery.query?.trim();
+    if (queryText) {
+      await this.prisma.popularSearch.upsert({
+        where: { query: queryText },
+        create: { query: queryText, frequency: 1 },
+        update: { frequency: { increment: 1 }, lastUpdated: new Date() },
+      });
+    }
+
+    if (optedOut) {
+      return queryId;
+    }
+
+    await this.prisma.searchAnalytics.create({
+      data: {
+        userId,
+        queryId,
+        query: queryText ?? null,
+        filters: (searchQuery.filters as Prisma.InputJsonValue | undefined) ?? Prisma.JsonNull,
+      },
+    });
+
+    if (queryText) {
+      await this.prisma.searchHistory.upsert({
+        where: { userId_query: { userId, query: queryText } },
+        create: { userId, query: queryText, frequency: 1 },
+        update: { frequency: { increment: 1 }, lastSearched: new Date() },
+      });
+    }
 
     return queryId;
   }
 
+  /**
+   * Store result metadata on an already-recorded analytics row. No-op when the
+   * user opted out (no row was created).
+   */
   async recordSearchResults(queryId: string, resultsCount: number, took: number): Promise<void> {
-    void queryId;
-    void resultsCount;
-    void took;
+    await this.prisma.searchAnalytics.updateMany({
+      where: { queryId },
+      data: { resultsCount, took, hasResults: resultsCount > 0 },
+    });
   }
 
   async recordSearchConversion(queryId: string, propertyId?: string): Promise<void> {
-    void queryId;
     void propertyId;
+    await this.prisma.searchAnalytics.updateMany({
+      where: { queryId },
+      data: { converted: true },
+    });
   }
 
   async recordSearchError(queryId: string, error: unknown): Promise<void> {
-    void queryId;
     void error;
+    await this.prisma.searchAnalytics.updateMany({
+      where: { queryId },
+      data: { hasResults: false },
+    });
   }
 
   async getAnalytics(userId?: string): Promise<SearchInsights> {

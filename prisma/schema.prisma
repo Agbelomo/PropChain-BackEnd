@@ -843,7 +843,8 @@ model UserPreferences {
   quietHoursStart        String?  @map("quiet_hours_start") // "HH:MM" in user timezone
   quietHoursEnd          String?  @map("quiet_hours_end") // "HH:MM" in user timezone
   perEventSettings       Json?    @map("per_event_settings") // fine-grained per-event channel overrides
-  optOutReminders        Boolean  @default(false) @map("opt_out_reminders") // #563
+optOutReminders          Boolean  @default(false) @map("opt_out_reminders") // #563
+  searchAnalyticsOptOut    Boolean  @default(false) @map("search_analytics_opt_out") // #1184
   createdAt              DateTime @default(now()) @map("created_at")
   updatedAt              DateTime  @updatedAt @map("updated_at")
 
