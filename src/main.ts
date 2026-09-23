@@ -59,7 +59,7 @@ async function bootstrap() {
     origin: corsOrigins,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization', 'API-Version', 'api-key'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'API-Version', 'api-key', 'x-api-key'],
   });
 
   // Security headers middleware
