@@ -50,6 +50,6 @@ function signedUrlProviderFactory(): Type<SignedUrlProvider> {
       useClass: signedUrlProviderFactory(),
     },
   ],
-  exports: [DocumentsService, DocumentUploadService],
+  exports: [DocumentsService, DocumentUploadService, SignedUrlService],
 })
 export class DocumentsModule {}
