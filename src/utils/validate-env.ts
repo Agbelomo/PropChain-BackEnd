@@ -1,4 +1,5 @@
 import { Logger } from '@nestjs/common';
+import Web3 from 'web3';
 
 const logger = new Logger('EnvValidation');
 
@@ -45,7 +46,9 @@ export function validateEnvironment(): void {
     }
   }
 
-  if (MISSING.length > 0 || WEAK.length > 0) {
+  const blockchainErrors = validateBlockchainEnvironment();
+
+  if (MISSING.length > 0 || WEAK.length > 0 || blockchainErrors.length > 0) {
     const sections: string[] = [];
     if (MISSING.length > 0) {
       sections.push(
@@ -56,6 +59,11 @@ export function validateEnvironment(): void {
       sections.push(
         `Environment variables below the minimum required length (256 bits / ${MIN_JWT_SECRET_LENGTH} chars):\n` +
           WEAK.map((k) => `    - ${k}`).join('\n'),
+      );
+    }
+    if (blockchainErrors.length > 0) {
+      sections.push(
+        `Blockchain configuration errors:\n` + blockchainErrors.map((k) => `    - ${k}`).join('\n'),
       );
     }
     logger.error(

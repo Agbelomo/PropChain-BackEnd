@@ -1,5 +1,8 @@
 import { Logger } from '@nestjs/common';
-import { validateEnvironment } from '../../src/utils/validate-env';
+import {
+  validateEnvironment,
+  validateBlockchainEnvironment,
+} from '../../src/utils/validate-env';
 
 describe('validateEnvironment', () => {
   const originalEnv = { ...process.env };
@@ -14,6 +17,9 @@ describe('validateEnvironment', () => {
     delete process.env.DATABASE_URL;
     delete process.env.JWT_SECRET;
     delete process.env.JWT_REFRESH_SECRET;
+    // Blockchain validation is opt-in per the #1178 checks; keep the rest of
+    // the suite independent of it.
+    process.env.BLOCKCHAIN_ENABLED = 'false';
   });
 
   afterAll(() => {
@@ -190,5 +196,75 @@ describe('validateEnvironment', () => {
 
     expect(mockLoggerError).not.toHaveBeenCalled();
     expect(mockExit).not.toHaveBeenCalled();
+  });
+});
+
+describe('validateBlockchainEnvironment (#1178)', () => {
+  const originalEnv = { ...process.env };
+
+  function setValidBlockchainEnv(): void {
+    process.env.BLOCKCHAIN_ENABLED = 'true';
+    process.env.BLOCKCHAIN_RPC_URL = 'https://sepolia.infura.io/v3/validprojectid';
+    process.env.BLOCKCHAIN_CONTRACT_ADDRESS =
+      '0xFB1b73C4F0BDa4F67Dca266ce6EF42f520fbb98';
+    process.env.BLOCKCHAIN_PRIVATE_KEY =
+      '0x' + 'a1'.repeat(32);
+  }
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    delete process.env.BLOCKCHAIN_ENABLED;
+    delete process.env.BLOCKCHAIN_RPC_URL;
+    delete process.env.BLOCKCHAIN_CONTRACT_ADDRESS;
+    delete process.env.BLOCKCHAIN_PRIVATE_KEY;
+  });
+
+  afterAll(() => {
+    process.env = originalEnv;
+  });
+
+  it('returns no errors when BLOCKCHAIN_ENABLED is false, regardless of placeholders', () => {
+    process.env.BLOCKCHAIN_ENABLED = 'false';
+    process.env.BLOCKCHAIN_CONTRACT_ADDRESS =
+      '0x0000000000000000000000000000000000000000';
+    expect(validateBlockchainEnvironment()).toEqual([]);
+  });
+
+  it('returns no errors for a valid, checksummed configuration', () => {
+    setValidBlockchainEnv();
+    expect(validateBlockchainEnvironment()).toEqual([]);
+  });
+
+  it('rejects the zero-address placeholder contract address', () => {
+    setValidBlockchainEnv();
+    process.env.BLOCKCHAIN_CONTRACT_ADDRESS =
+      '0x0000000000000000000000000000000000000000';
+    const errors = validateBlockchainEnvironment();
+    expect(errors.join(' ')).toContain('zero address');
+  });
+
+  it('rejects a non-checksummed contract address', () => {
+    setValidBlockchainEnv();
+    // Flip the first hex nibble's case to break the EIP-55 checksum.
+    process.env.BLOCKCHAIN_CONTRACT_ADDRESS =
+      '0xfB1b73C4F0BDa4F67Dca266ce6EF42f520fbb98';
+    const errors = validateBlockchainEnvironment();
+    expect(errors.join(' ')).toContain('checksum');
+  });
+
+  it('rejects a placeholder RPC URL and missing private key', () => {
+    setValidBlockchainEnv();
+    process.env.BLOCKCHAIN_RPC_URL = 'https://sepolia.infura.io/v3/YOUR_INFURA_KEY';
+    delete process.env.BLOCKCHAIN_PRIVATE_KEY;
+    const errors = validateBlockchainEnvironment().join(' ');
+    expect(errors).toContain('BLOCKCHAIN_RPC_URL');
+    expect(errors).toContain('BLOCKCHAIN_PRIVATE_KEY');
+  });
+
+  it('requires BLOCKCHAIN_CONTRACT_ADDRESS when enabled', () => {
+    setValidBlockchainEnv();
+    delete process.env.BLOCKCHAIN_CONTRACT_ADDRESS;
+    const errors = validateBlockchainEnvironment().join(' ');
+    expect(errors).toContain('BLOCKCHAIN_CONTRACT_ADDRESS is required');
   });
 });
