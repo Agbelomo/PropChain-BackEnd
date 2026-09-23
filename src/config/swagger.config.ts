@@ -31,9 +31,19 @@ export function setupSwagger(app: INestApplication): void {
         type: 'apiKey',
         name: 'api-key',
         in: 'header',
-        description: 'API Key for server-to-server authentication',
+        description:
+          'API Key for server-to-server authentication. The legacy `x-api-key` header is also accepted.',
       },
       'api-key',
+    )
+    .addApiKey(
+      {
+        type: 'apiKey',
+        name: 'x-api-key',
+        in: 'header',
+        description: 'Legacy alias for the `api-key` header (accepted for compatibility).',
+      },
+      'x-api-key',
     )
     .addApiKey(
       {

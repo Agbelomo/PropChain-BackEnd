@@ -95,6 +95,30 @@ cp .env.example .env
 # Set up your database URL in .env file
 ```
 
+## 🐳 Docker Workflow (#1175)
+
+A production `Dockerfile` is included and `docker-compose.yml` wires up the
+full stack (`app`, `postgres`, `pgbouncer`, `redis`).
+
+```bash
+# Build and boot the full stack
+docker compose up --build
+
+# Verify container health (GET /healthz returns 200)
+curl -fsSL http://localhost:3000/healthz
+
+# Tear down (including volumes)
+docker compose down -v
+```
+
+- The `app` container applies pending Prisma migrations (`prisma migrate deploy`)
+  via `docker-entrypoint.sh` before starting `node dist/main`.
+- Health checks: `postgres`/`pgbouncer`/`redis` use their native probes; the
+  `app` service probes `GET /healthz`.
+- Override secrets via `.env` variables: `POSTGRES_PASSWORD`, `JWT_SECRET`,
+  `JWT_REFRESH_SECRET`, `REDIS_PASSWORD`. The JWT secrets must each be at
+  least 32 characters or the app will refuse to boot.
+
 ## ⚙️ Configuration
 
 The application uses environment variables for configuration. Copy `.env.example` to `.env` and adjust the values as needed.

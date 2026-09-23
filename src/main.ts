@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, BadRequestException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { VersionHeaderInterceptor } from './versioning/version-header.interceptor';
 import { DeprecationWarningInterceptor } from './versioning/deprecation-warning.interceptor';
@@ -37,10 +38,20 @@ async function bootstrap() {
     process.exit(1);
   }
 
-  const app = await NestFactory.create(AppModule, {
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     // Issue #914 – replace NestJS default ConsoleLogger with our structured logger
     logger: new AppLogger('NestApplication'),
   });
+
+  // Issue #1195 – only trust forwarded headers behind a configured reverse
+  // proxy. Without this, RateLimitGuard ignores x-forwarded-for entirely so a
+  // spoofed header cannot rotate the per-IP rate-limit buckets.
+  const trustProxy = process.env.TRUST_PROXY;
+  if (trustProxy) {
+    app.set('trust proxy', trustProxy);
+  } else {
+    app.set('trust proxy', false);
+  }
 
   // CORS configuration
   const corsOrigins = process.env.CORS_ORIGINS
@@ -59,7 +70,7 @@ async function bootstrap() {
     origin: corsOrigins,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization', 'API-Version', 'api-key'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'API-Version', 'api-key', 'x-api-key'],
   });
 
   // Security headers middleware

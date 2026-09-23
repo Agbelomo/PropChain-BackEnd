@@ -35,6 +35,7 @@ describe('validateEnvironment', () => {
     process.env.DATABASE_URL = 'postgresql://user:pass@localhost:5432/db';
     process.env.JWT_SECRET = 'thisisalongenoughsecretkeythatis32charsmin';
     process.env.JWT_REFRESH_SECRET = 'thisisanotherlongenoughsecretkeythatis32charsmin';
+    process.env.RECAPTCHA_SECRET = 'test-recaptcha-secret';
 
     validateEnvironment();
 
@@ -161,6 +162,35 @@ describe('validateEnvironment', () => {
     process.env.DATABASE_URL = 'postgresql://user:pass@localhost:5432/db';
     process.env.JWT_SECRET = 'a'.repeat(32);
     process.env.JWT_REFRESH_SECRET = 'b'.repeat(32);
+    process.env.RECAPTCHA_SECRET = 'test-recaptcha-secret';
+
+    validateEnvironment();
+
+    expect(mockLoggerError).not.toHaveBeenCalled();
+    expect(mockExit).not.toHaveBeenCalled();
+  });
+
+  it('should log an error and exit when RECAPTCHA_SECRET is missing and CAPTCHA is required', () => {
+    process.env.DATABASE_URL = 'postgresql://user:pass@localhost:5432/db';
+    process.env.JWT_SECRET = 'thisisalongenoughsecretkeythatis32charsmin';
+    process.env.JWT_REFRESH_SECRET = 'thisisanotherlongenoughsecretkeythatis32charsmin';
+    delete process.env.RECAPTCHA_SECRET;
+    delete process.env.CAPTCHA_BYPASS;
+
+    validateEnvironment();
+
+    expect(mockLoggerError).toHaveBeenCalled();
+    expect(mockExit).toHaveBeenCalledWith(1);
+    const errorMessage = mockLoggerError.mock.calls[0][0];
+    expect(errorMessage).toContain('RECAPTCHA_SECRET');
+  });
+
+  it('should not require RECAPTCHA_SECRET when CAPTCHA_BYPASS=true', () => {
+    process.env.DATABASE_URL = 'postgresql://user:pass@localhost:5432/db';
+    process.env.JWT_SECRET = 'thisisalongenoughsecretkeythatis32charsmin';
+    process.env.JWT_REFRESH_SECRET = 'thisisanotherlongenoughsecretkeythatis32charsmin';
+    delete process.env.RECAPTCHA_SECRET;
+    process.env.CAPTCHA_BYPASS = 'true';
 
     validateEnvironment();
 

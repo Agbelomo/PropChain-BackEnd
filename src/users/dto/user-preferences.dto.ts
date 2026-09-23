@@ -72,6 +72,11 @@ export class CreateUserPreferencesDto {
   @IsBoolean()
   marketUpdates?: boolean;
 
+  @ApiPropertyOptional({ description: 'Opt out of per-search analytics recording (#1184)' })
+  @IsOptional()
+  @IsBoolean()
+  searchAnalyticsOptOut?: boolean;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsObject()
