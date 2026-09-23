@@ -19,6 +19,8 @@ const DEFAULT_RETENTION = {
   passwordResetTokens: 1, // reset tokens are short-lived
   sessions: 30, // keep session history for 30 days
   loginHistory: 90, // keep login history for 90 days
+  searchAnalytics: 30, // per-search analytics rows (contain PII) – 30 days
+  searchHistory: 30, // per-user search history – 30 days
 } as const;
 
 const BATCH_SIZE = 500;
@@ -81,6 +83,8 @@ export class CleanupService {
     results.push(await this.cleanPasswordResetTokens(now));
     results.push(await this.cleanExpiredSessions(now));
     results.push(await this.cleanOldLoginHistory(now));
+    results.push(await this.cleanOldSearchAnalytics(now));
+    results.push(await this.cleanOldSearchHistory(now));
 
     const summary: CleanupSummary = {
       ranAt: now.toISOString(),
@@ -233,5 +237,81 @@ export class CleanupService {
       `cleanOldLoginHistory: removed ${deleted} record(s) (retention: ${retentionDays}d)`,
     );
     return { entity: 'LoginHistory', deleted, durationMs: Date.now() - start };
+  }
+
+  /**
+   * Prune old SearchAnalytics rows (PII: userId, query, filters, IP) on a
+   * shared search retention window (#1182). PopularSearch aggregates are kept.
+   */
+  private async cleanOldSearchAnalytics(now: Date): Promise<CleanupResult> {
+    const start = Date.now();
+    const retentionDays = parseInt(
+      process.env.CLEANUP_SEARCH_RETENTION_DAYS ?? String(DEFAULT_RETENTION.searchAnalytics),
+      10,
+    );
+
+    const cutoff = new Date(now.getTime() - retentionDays * 24 * 60 * 60 * 1000);
+    let deleted = 0;
+
+    let batch: number;
+    do {
+      const ids = await this.prisma.searchAnalytics.findMany({
+        where: { createdAt: { lt: cutoff } },
+        select: { id: true },
+        take: BATCH_SIZE,
+      });
+
+      if (ids.length === 0) break;
+
+      const result = await this.prisma.searchAnalytics.deleteMany({
+        where: { id: { in: ids.map((r) => r.id) } },
+      });
+
+      batch = result.count;
+      deleted += batch;
+    } while (batch === BATCH_SIZE);
+
+    this.logger.log(
+      `cleanOldSearchAnalytics: removed ${deleted} record(s) (retention: ${retentionDays}d)`,
+    );
+    return { entity: 'SearchAnalytics', deleted, durationMs: Date.now() - start };
+  }
+
+  /**
+   * Prune old SearchHistory rows (PII: userId + query) on the same retention
+   * window (#1182).
+   */
+  private async cleanOldSearchHistory(now: Date): Promise<CleanupResult> {
+    const start = Date.now();
+    const retentionDays = parseInt(
+      process.env.CLEANUP_SEARCH_RETENTION_DAYS ?? String(DEFAULT_RETENTION.searchHistory),
+      10,
+    );
+
+    const cutoff = new Date(now.getTime() - retentionDays * 24 * 60 * 60 * 1000);
+    let deleted = 0;
+
+    let batch: number;
+    do {
+      const ids = await this.prisma.searchHistory.findMany({
+        where: { lastSearched: { lt: cutoff } },
+        select: { id: true },
+        take: BATCH_SIZE,
+      });
+
+      if (ids.length === 0) break;
+
+      const result = await this.prisma.searchHistory.deleteMany({
+        where: { id: { in: ids.map((r) => r.id) } },
+      });
+
+      batch = result.count;
+      deleted += batch;
+    } while (batch === BATCH_SIZE);
+
+    this.logger.log(
+      `cleanOldSearchHistory: removed ${deleted} record(s) (retention: ${retentionDays}d)`,
+    );
+    return { entity: 'SearchHistory', deleted, durationMs: Date.now() - start };
   }
 }
