@@ -93,6 +93,26 @@ export class TransactionsService {
 
     await this.commissionsService.createCommissionsForTransaction(transaction.id);
 
+    if (process.env.BLOCKCHAIN_ENABLED !== 'false') {
+      try {
+        const buyerAddr = buyer.phone || '0x0000000000000000000000000000000000000000';
+        const sellerAddr = seller.phone || '0x0000000000000000000000000000000000000000';
+        const hash = this.blockchainService.generateBlockchainHash({
+          transactionId: transaction.id,
+          propertyId: dto.propertyId,
+          buyerAddress: buyerAddr,
+          sellerAddress: sellerAddr,
+          amount: Number(dto.amount),
+        });
+        await this.prisma.transaction.update({
+          where: { id: transaction.id },
+          data: { blockchainHash: hash },
+        });
+      } catch (e) {
+        this.logger.warn(`Failed to auto-record transaction on blockchain: ${(e as Error).message}`);
+      }
+    }
+
     this.logger.log(`Transaction created: ${transaction.id}`);
     return this.toResponseDto(transaction);
   }
