@@ -245,4 +245,38 @@ export class PropertyExpiryService {
     this.logger.log('Manual property expiry triggered');
     return this.propertiesService.expireProperties();
   }
+
+  /**
+   * Checks whether an expired property is currently within its grace period.
+   */
+  isInGracePeriod(property: { status: PropertyStatus; updatedAt: Date }): boolean {
+    if (property.status !== PropertyStatus.EXPIRED) {
+      return false;
+    }
+    const graceCutoff = new Date();
+    graceCutoff.setDate(graceCutoff.getDate() - GRACE_PERIOD_DAYS);
+    return property.updatedAt >= graceCutoff;
+  }
+
+  /**
+   * Calculates remaining days until expiry for a property.
+   */
+  getDaysUntilExpiry(expiryDate: Date | null): number | null {
+    if (!expiryDate) {
+      return null;
+    }
+    const diffMs = new Date(expiryDate).getTime() - Date.now();
+    return Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+  }
+
+  /**
+   * Calculates remaining days in grace period for an expired property.
+   */
+  getGracePeriodRemainingDays(updatedAt: Date): number {
+    const expiredAt = new Date(updatedAt);
+    const graceEnd = new Date(expiredAt);
+    graceEnd.setDate(graceEnd.getDate() + GRACE_PERIOD_DAYS);
+    const diffMs = graceEnd.getTime() - Date.now();
+    return Math.max(0, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
+  }
 }
