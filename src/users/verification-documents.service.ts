@@ -5,7 +5,7 @@ import {
   ReviewVerificationDocumentDto,
   UpdateVerificationDocumentDto,
 } from './dto/verification-document.dto';
-import { VerificationStatus } from '@prisma/client';
+import { VerificationStatus, Prisma } from '@prisma/client';
 
 @Injectable()
 export class VerificationDocumentsService {
@@ -99,7 +99,9 @@ export class VerificationDocumentsService {
   async findAllForAdmin(page = 1, limit = 20, status?: string) {
     const skip = (page - 1) * limit;
 
-    const where: any = status ? { status: status as VerificationStatus } : {};
+    const where: Prisma.VerificationDocumentWhereInput = status
+      ? { status: status as VerificationStatus }
+      : {};
 
     const [documents, total] = await Promise.all([
       this.prisma.verificationDocument.findMany({

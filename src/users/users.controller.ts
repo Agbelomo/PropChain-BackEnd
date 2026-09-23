@@ -4,6 +4,8 @@ import {
   Delete,
   ForbiddenException,
   Get,
+  GoneException,
+  HttpException,
   HttpStatus,
   InternalServerErrorException,
   NotFoundException,
@@ -12,6 +14,7 @@ import {
   Put,
   Query,
   Res,
+  StreamableFile,
   UseGuards,
 } from '@nestjs/common';
 import { Response } from 'express';
@@ -24,13 +27,100 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { AuthUserPayload } from '../auth/types/auth-user.type';
 import { UserRole } from '../types/prisma.types';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { UsersService } from './users.service';
-import { CreateUserDto, SearchUsersDto, UpdatePreferencesDto, UpdateUserDto } from './dto/user.dto';
+import { ActivityLogService } from './activity-log.service';
+import {
+  CreateUserDto,
+  SearchUsersDto,
+  UpdatePreferencesDto,
+  UpdateUserDto,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  UpdateUserProfileDto,
+} from './dto/user.dto';
 import { DeactivateAccountDto, ReactivateAccountDto } from './dto/deactivation.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
+import { RequestAccountDeletionDto } from './dto/account-deletion.dto';
+import { AccountDeletionService, DeletionJobResult } from './account-deletion.service';
+import { DataExportService, ExportResult } from './data-export.service';
 
+const UNAUTHORIZED_ACTION_MESSAGE = 'You are not authorized to perform this action';
+const REACTIVATE_LIMIT = 5;
+const REACTIVATE_WINDOW_MS = 60 * 60 * 1000;
+
+@ApiTags('Users')
+@ApiBearerAuth('access-token')
 @Controller('users')
 export class UsersController {
-  constructor(private readonly usersService: UsersService) {}
+  private readonly downloadRateLimitMap = new Map<string, { count: number; resetAt: number }>();
+  private readonly reactivateRateLimitMap = new Map<string, { count: number; resetAt: number }>();
+  private static readonly DOWNLOAD_LIMIT = 10;
+  private static readonly DOWNLOAD_WINDOW_MS = 60 * 60 * 1000;
+
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly activityLogService: ActivityLogService,
+    private readonly accountDeletionService: AccountDeletionService,
+    private readonly dataExportService: DataExportService,
+  ) {}
+
+  // ─── Issue #960 — Account Deletion Workflow (self-service) ─────────────────
+
+  @UseGuards(JwtAuthGuard)
+  @Post('me/request-deletion')
+  async requestAccountDeletion(
+    @CurrentUser() user: AuthUserPayload,
+    @Body() body: RequestAccountDeletionDto,
+  ): Promise<{
+    userId: string;
+    isDeactivated: boolean;
+    scheduledDeletionAt: Date;
+    retentionDays: number;
+  }> {
+    return this.accountDeletionService.requestDeletion({
+      userId: user.sub,
+      actorId: user.sub,
+      retentionDays: body?.retentionDays,
+      reason: body?.reason ?? null,
+    });
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('me/cancel-deletion')
+  async cancelAccountDeletion(
+    @CurrentUser() user: AuthUserPayload,
+  ): Promise<{ userId: string; isDeactivated: boolean; scheduledDeletionAt: Date | null }> {
+    return this.accountDeletionService.cancelDeletion({
+      userId: user.sub,
+      actorId: user.sub,
+    });
+  }
+
+  // ─── Issue #959 — GDPR Personal Data Export (self-service) ──────────────────
+
+  @UseGuards(JwtAuthGuard)
+  @Post('me/request-export')
+  async requestPersonalDataExport(@CurrentUser() user: AuthUserPayload): Promise<ExportResult> {
+    return this.dataExportService.exportPersonalData({
+      userId: user.sub,
+      actorId: user.sub,
+    });
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('me/exports/:jobId/stream')
+  async streamExportArchive(
+    @Param('jobId') jobId: string,
+    @CurrentUser() _user: AuthUserPayload,
+  ): Promise<StreamableFile> {
+    const stream = await this.dataExportService.streamExportArchive(jobId);
+    return new StreamableFile(stream, {
+      type: 'application/zip',
+      disposition: `attachment; filename="propchain-export-${jobId}.zip"`,
+    });
+  }
+
+  // ─── Admin Endpoints ─────────────────────────────────────────────
 
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
@@ -94,11 +184,27 @@ export class UsersController {
     return this.usersService.remove(id);
   }
 
+  // ─── Profile Management (#306) ───────────────────────────────────
+
+  @UseGuards(JwtAuthGuard)
+  @Get('me/profile')
+  getProfile(@CurrentUser() user: AuthUserPayload) {
+    return this.usersService.getProfile(user.sub);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Put('me/profile')
+  updateProfile(@CurrentUser() user: AuthUserPayload, @Body() updateProfileDto: UpdateProfileDto) {
+    return this.usersService.updateProfile(user.sub, updateProfileDto);
+  }
+
+  // ─── User Self-Service ───────────────────────────────────────────
+
   @UseGuards(JwtAuthGuard)
   @Post(':id/export')
   async exportData(@Param('id') id: string, @CurrentUser() user: AuthUserPayload) {
     if (user.sub !== id && user.role !== UserRole.ADMIN) {
-      throw new ForbiddenException("You are not authorized to export this user's data");
+      throw new ForbiddenException(UNAUTHORIZED_ACTION_MESSAGE);
     }
 
     try {
@@ -132,17 +238,48 @@ export class UsersController {
     @Res() res: Response,
     @CurrentUser() user: AuthUserPayload,
   ) {
+    const now = Date.now();
+    const entry = this.downloadRateLimitMap.get(user.sub);
+    if (entry && now < entry.resetAt) {
+      if (entry.count >= UsersController.DOWNLOAD_LIMIT) {
+        throw new HttpException(
+          'Too many export downloads. Please try again later.',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+      entry.count++;
+    } else {
+      this.downloadRateLimitMap.set(user.sub, {
+        count: 1,
+        resetAt: now + UsersController.DOWNLOAD_WINDOW_MS,
+      });
+    }
+
     const filepath = path.join(process.cwd(), 'exports', filename);
 
     if (!fs.existsSync(filepath)) {
       throw new NotFoundException('Export file not found');
     }
 
+    const stats = fs.statSync(filepath);
+    const expirationTime = 24 * 60 * 60 * 1000;
+    if (Date.now() - stats.mtimeMs > expirationTime) {
+      throw new GoneException('Export file has expired');
+    }
+
     const ownerId = this.extractExportOwnerId(filename);
 
     if (user.sub !== ownerId && user.role !== UserRole.ADMIN) {
-      throw new ForbiddenException('You are not authorized to download this export');
+      throw new ForbiddenException(UNAUTHORIZED_ACTION_MESSAGE);
     }
+
+    this.activityLogService.create(user.sub, {
+      action: 'EXPORT_DOWNLOAD',
+      entityType: 'USER',
+      entityId: ownerId,
+      description: `Downloaded export file: ${filename}`,
+      metadata: { filename, ownerId },
+    });
 
     res.download(filepath, (err) => {
       if (err && !res.headersSent) {
@@ -163,19 +300,41 @@ export class UsersController {
     return this.usersService.deactivate(user.sub, deactivateDto);
   }
 
+  @UseGuards(JwtAuthGuard)
+  @Post('me/request-reactivation')
+  requestReactivation(@CurrentUser() user: AuthUserPayload) {
+    return this.usersService.requestReactivation(user.sub);
+  }
+
+  @UseGuards(JwtAuthGuard)
   @Post('me/reactivate')
   reactivateAccount(
-    @Body() data: { email: string; token?: string },
+    @CurrentUser() user: AuthUserPayload,
     @Body() reactivateDto: ReactivateAccountDto,
   ) {
-    return this.usersService.findByEmail(data.email).then((foundUser) => {
-      if (!foundUser) {
-        throw new Error('User not found');
-      }
+    const emailLower = user.email.toLowerCase();
+    const now = Date.now();
+    const entry = this.reactivateRateLimitMap.get(emailLower);
 
-      return this.usersService.reactivate(foundUser.id, reactivateDto);
-    });
+    if (entry && now < entry.resetAt) {
+      if (entry.count >= REACTIVATE_LIMIT) {
+        throw new HttpException(
+          'Too many reactivation attempts. Try again later.',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+      entry.count++;
+    } else {
+      this.reactivateRateLimitMap.set(emailLower, {
+        count: 1,
+        resetAt: now + REACTIVATE_WINDOW_MS,
+      });
+    }
+
+    return this.usersService.reactivate(user.sub, reactivateDto);
   }
+
+  // ─── Admin Verification ────────────────────────────────────────
 
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
@@ -204,6 +363,8 @@ export class UsersController {
   adminReactivateAccount(@Param('id') id: string, @Body() reactivateDto: ReactivateAccountDto) {
     return this.usersService.reactivate(id, reactivateDto);
   }
+
+  // ─── Preferences & Referrals ────────────────────────────────────
 
   @UseGuards(JwtAuthGuard)
   @Put('me/preferences')
@@ -242,8 +403,8 @@ export class UsersController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @Post('delete-scheduled')
-  deleteScheduledUsers() {
-    return this.usersService.deleteDeactivatedUsers();
+  deleteScheduledUsers(): Promise<DeletionJobResult> {
+    return this.accountDeletionService.performScheduledDeletion();
   }
 
   private extractExportOwnerId(filename: string) {

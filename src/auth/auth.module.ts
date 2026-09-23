@@ -1,24 +1,29 @@
 import { Module } from '@nestjs/common';
+import { PassportModule } from '@nestjs/passport';
 import { PrismaModule } from '../database/prisma.module';
 import { UsersModule } from '../users/users.module';
 import { SessionsModule } from '../sessions/sessions.module';
 import { EmailModule } from '../email/email.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { ApiKeyAnalyticsService } from './api-key-analytics.service';
 import { LoginRateLimitService } from './login-rate-limit.service';
 import { RateLimitService } from './rate-limit.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { ApiKeyAuthGuard } from './guards/api-key-auth.guard';
+import { GoogleStrategy } from './strategies/google.strategy';
 import { RolesGuard } from './guards/roles.guard';
 import { RateLimitGuard } from './guards/rate-limit.guard';
 import { RateLimitHeadersInterceptor } from './interceptors/rate-limit-headers.interceptor';
 import { RateLimitAdminController } from './controllers/rate-limit-admin.controller';
+import { FraudModule } from '../fraud/fraud.module';
 
 @Module({
-  imports: [PrismaModule, UsersModule, SessionsModule, EmailModule],
+  imports: [PrismaModule, UsersModule, SessionsModule, EmailModule, FraudModule, PassportModule],
   controllers: [AuthController, RateLimitAdminController],
   providers: [
     AuthService,
+    ApiKeyAnalyticsService,
     LoginRateLimitService,
     RateLimitService,
     JwtAuthGuard,
@@ -26,9 +31,11 @@ import { RateLimitAdminController } from './controllers/rate-limit-admin.control
     RolesGuard,
     RateLimitGuard,
     RateLimitHeadersInterceptor,
+    GoogleStrategy,
   ],
   exports: [
     AuthService,
+    ApiKeyAnalyticsService,
     RolesGuard,
     LoginRateLimitService,
     RateLimitService,

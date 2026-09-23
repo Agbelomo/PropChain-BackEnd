@@ -1,105 +1,368 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { PrismaService } from '../database/prisma.service';
+import { TrackingService } from '../tracking/tracking.service';
+import { I18nService } from '../i18n/i18n.service';
+import { v4 as uuidv4 } from 'uuid';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
+
+const UNSUBSCRIBE_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
 export interface EmailOptions {
   to: string;
   subject: string;
-  html: string;
+  html?: string;
   text?: string;
+  userId?: string;
+  emailType?: string;
+  template?: string;
+  context?: any;
+  language?: string;
+}
+
+export interface FraudAlertEmailPayload {
+  alertId: string;
+  pattern: string;
+  severity: string;
+  title: string;
+  description: string;
+  userEmail?: string | null;
+}
+
+export interface TransactionStatusPayload {
+  transactionId: string;
+  propertyTitle: string;
+  propertyAddress: string;
+  buyerName: string;
+  sellerName: string;
+  amount: string;
+  completionDate?: string;
+  blockchainTxHash?: string;
+  cancellationReason?: string;
+  cancelledDate?: string;
 }
 
 @Injectable()
 export class EmailService {
-  constructor(private readonly configService: ConfigService) {}
+  private readonly logger = new Logger(EmailService.name);
+
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly prisma: PrismaService,
+    private readonly trackingService: TrackingService,
+    private readonly i18nService: I18nService,
+    @InjectQueue('mail') private readonly mailQueue: Queue,
+  ) {}
 
   async sendPasswordResetEmail(email: string, resetToken: string): Promise<void> {
     const resetUrl = `${this.configService.get<string>('FRONTEND_URL', 'http://localhost:3000')}/reset-password?token=${resetToken}`;
 
-    const emailOptions: EmailOptions = {
+    await this.sendEmail({
       to: email,
       subject: 'Password Reset - PropChain',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #333;">Password Reset Request</h2>
-          <p>You have requested to reset your password for your PropChain account.</p>
-          <p>Please click the link below to reset your password:</p>
-          <a href="${resetUrl}" style="display: inline-block; padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0;">
-            Reset Password
-          </a>
-          <p>If you didn't request this password reset, please ignore this email.</p>
-          <p>This link will expire in 1 hour for security reasons.</p>
-          <p>Best regards,<br>The PropChain Team</p>
-        </div>
-      `,
-      text: `
-        Password Reset Request
-
-        You have requested to reset your password for your PropChain account.
-
-        Please use the following link to reset your password:
-        ${resetUrl}
-
-        If you didn't request this password reset, please ignore this email.
-
-        This link will expire in 1 hour for security reasons.
-
-        Best regards,
-        The PropChain Team
-      `,
-    };
-
-    await this.sendEmail(emailOptions);
+      template: 'password-reset',
+      context: { resetUrl },
+      text: `Password Reset Request. Please use this link: ${resetUrl}`,
+    });
   }
 
   async sendAccountLockedEmail(email: string, lockoutDuration: number): Promise<void> {
-    const emailOptions: EmailOptions = {
+    await this.sendEmail({
       to: email,
       subject: 'Account Locked - PropChain',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #d9534f;">Account Locked</h2>
-          <p>Your PropChain account has been temporarily locked due to multiple failed login attempts.</p>
-          <p>The lockout will automatically expire in ${lockoutDuration} minutes.</p>
-          <p>If you did not attempt to log in, please reset your password immediately or contact our support team.</p>
-          <p>Best regards,<br>The PropChain Team</p>
-        </div>
-      `,
-      text: `
-        Account Locked
-
-        Your PropChain account has been temporarily locked due to multiple failed login attempts.
-
-        The lockout will automatically expire in ${lockoutDuration} minutes.
-
-        If you did not attempt to log in, please reset your password immediately or contact our support team.
-
-        Best regards,
-        The PropChain Team
-      `,
-    };
-
-    await this.sendEmail(emailOptions);
+      template: 'account-locked',
+      context: { lockoutDuration },
+      text: `Your account has been locked for ${lockoutDuration} minutes.`,
+    });
   }
 
-  private async sendEmail(options: EmailOptions): Promise<void> {
-    // For now, we'll just log the email. In production, you would integrate with
-    // an email service like SendGrid, Mailgun, AWS SES, etc.
+  async sendFraudAlertEmail(recipients: string[], payload: FraudAlertEmailPayload): Promise<void> {
+    await Promise.all(
+      recipients.map((recipient) =>
+        this.sendEmail({
+          to: recipient,
+          subject: `[Fraud Alert][${payload.severity}] ${payload.title}`,
+          template: 'fraud-alert',
+          context: {
+            alertId: payload.alertId,
+            pattern: payload.pattern,
+            severity: payload.severity,
+            userEmail: payload.userEmail ?? 'Unknown',
+            description: payload.description,
+          },
+          text: `Fraud Alert: ${payload.title}. Pattern: ${payload.pattern}. Severity: ${payload.severity}.`,
+        }),
+      ),
+    );
+  }
 
-    console.log('📧 Sending email:');
-    console.log(`To: ${options.to}`);
-    console.log(`Subject: ${options.subject}`);
-    console.log(`HTML: ${options.html.substring(0, 200)}...`);
-    console.log(`Text: ${options.text?.substring(0, 200)}...`);
+  async sendTransactionStatusEmail(
+    email: string,
+    status: string,
+    payload: TransactionStatusPayload,
+  ): Promise<void> {
+    const templateMap: Record<string, string> = {
+      PENDING: 'transaction-status-pending',
+      COMPLETED: 'transaction-status-completed',
+      CANCELLED: 'transaction-status-cancelled',
+    };
 
-    // TODO: Integrate with actual email service
-    // Example with nodemailer:
-    // const transporter = nodemailer.createTransporter({...});
-    // await transporter.sendMail({
-    //   from: this.configService.get('EMAIL_FROM'),
-    //   to: options.to,
-    //   subject: options.subject,
-    //   html: options.html,
-    //   text: options.text,
-    // });
+    const template = templateMap[status];
+    if (!template) {
+      this.logger.warn(`No template found for transaction status: ${status}`);
+      return;
+    }
+
+    await this.sendEmail({
+      to: email,
+      subject: `[PropChain] Transaction ${status}`,
+      template,
+      context: payload,
+      text: `Your transaction status has been updated to ${status}. Transaction ID: ${payload.transactionId}`,
+    });
+  }
+
+  async handleBounce(
+    email: string,
+    type: 'HARD' | 'SOFT',
+    reason?: string,
+    rawEvent?: any,
+  ): Promise<void> {
+    const user = await this.prisma.user.findUnique({ where: { email } });
+    if (!user) return;
+
+    await this.prisma.emailBounce.create({
+      data: {
+        userId: user.id,
+        email,
+        bounceType: type,
+        reason,
+        rawEvent,
+      },
+    });
+
+    if (type === 'HARD') {
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { emailStatus: 'BOUNCED' },
+      });
+
+      await this.prisma.userPreferences.upsert({
+        where: { userId: user.id },
+        update: { emailNotifications: false },
+        create: {
+          userId: user.id,
+          emailNotifications: false,
+        },
+      });
+
+      this.logger.warn(
+        `Hard bounce processed for ${email}: user marked as BOUNCED, email notifications disabled`,
+      );
+    } else {
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { emailStatus: 'BOUNCED' },
+      });
+    }
+  }
+
+  async handleComplaint(email: string, rawEvent?: any): Promise<void> {
+    const user = await this.prisma.user.findUnique({ where: { email } });
+    if (!user) return;
+
+    await this.prisma.emailBounce.create({
+      data: {
+        userId: user.id,
+        email,
+        bounceType: 'HARD',
+        reason: 'Spam complaint',
+        rawEvent,
+        spamAction: 'COMPLAINED',
+      },
+    });
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { emailStatus: 'BOUNCED' },
+    });
+
+    await this.prisma.userPreferences.upsert({
+      where: { userId: user.id },
+      update: { emailNotifications: false },
+      create: {
+        userId: user.id,
+        emailNotifications: false,
+      },
+    });
+
+    this.logger.warn(`Spam complaint processed for ${email}: user marked as BOUNCED`);
+  }
+
+  async handleUnsubscribe(email: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({ where: { email } });
+    if (!user) return;
+
+    await this.prisma.userPreferences.upsert({
+      where: { userId: user.id },
+      update: { emailNotifications: false },
+      create: {
+        userId: user.id,
+        emailNotifications: false,
+      },
+    });
+
+    this.logger.log(`Unsubscribe processed for ${email}`);
+  }
+
+  async getSenderReputation() {
+    const [totalBounced, totalComplaints, totalUsers, bouncedUsers, complainedUsers] =
+      await Promise.all([
+        this.prisma.emailBounce.count({ where: { bounceType: 'HARD' } }),
+        this.prisma.emailBounce.count({ where: { spamAction: 'COMPLAINED' } }),
+        this.prisma.user.count(),
+        this.prisma.user.count({ where: { emailStatus: 'BOUNCED' } }),
+        this.prisma.user.count({ where: { isBlocked: false } }),
+      ]);
+
+    const bounceRate = totalUsers > 0 ? (bouncedUsers / totalUsers) * 100 : 0;
+    const complaintRate =
+      totalUsers > 0 ? (complainedUsers > 0 ? (complainedUsers / totalUsers) * 100 : 0) : 0;
+    const reputationScore = Math.max(0, 100 - bounceRate * 10 - complaintRate * 20);
+
+    return {
+      totals: {
+        totalUsers,
+        bouncedUsers,
+        totalBouncedEvents: totalBounced,
+        totalComplaints,
+      },
+      rates: {
+        bounceRate: Math.round(bounceRate * 100) / 100,
+        complaintRate: Math.round(complaintRate * 100) / 100,
+      },
+      reputationScore: Math.round(reputationScore * 100) / 100,
+      health: reputationScore >= 90 ? 'GOOD' : reputationScore >= 70 ? 'FAIR' : 'POOR',
+    };
+  }
+
+  buildListUnsubscribeHeader(userId?: string, email?: string): string | null {
+    if (!userId || !email) return null;
+    const token = Buffer.from(`${userId}:${email}`).toString('base64');
+    return `<${UNSUBSCRIBE_URL}/unsubscribe?token=${token}>`;
+  }
+
+  async sendEmail(options: EmailOptions): Promise<void> {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const baseUrl = this.configService.get<string>('API_URL', 'http://localhost:3000/api');
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const html = options.html;
+
+    if (options.language && options.template) {
+      const lang = options.language;
+      const i18nKey = `email.${options.template}`;
+      const translated = this.i18nService.translate(
+        i18nKey,
+        { userPreference: lang },
+        options.context,
+      );
+      if (translated !== i18nKey) {
+        options.subject = options.subject || translated;
+      }
+    }
+
+    // 1. Check if user is blocked or has invalid email
+    if (options.userId) {
+      const user = await this.prisma.user.findUnique({ where: { id: options.userId } });
+      if (user && (user.isBlocked || user.emailStatus === 'INVALID')) {
+        this.logger.warn(`🚫 Skipping email to ${options.to} (User blocked or email invalid)`);
+        return;
+      }
+    }
+
+    // 2. Open Tracking: Inject pixel (only if we have a userId and emailType)
+    // Note: If using templates, tracking usually needs to be handled in the template or post-render.
+    // For simplicity in this implementation, we'll pass the tracking info to the context.
+    if (options.userId && options.emailType) {
+      const trackingId = uuidv4();
+      await this.trackingService.createEmailEngagement(
+        options.userId,
+        options.emailType,
+        trackingId,
+      );
+
+      const baseUrl = this.configService.get<string>('API_URL', 'http://localhost:3000/api');
+      const pixelUrl = `${baseUrl}/track/open/${trackingId}.png`;
+
+      options.context = {
+        ...options.context,
+        trackingPixel: pixelUrl,
+        userId: options.userId,
+      };
+    }
+
+    // 3. Add to Queue
+    try {
+      const listUnsubscribe = this.buildListUnsubscribeHeader(options.userId, options.to);
+
+      await this.mailQueue.add(
+        'sendEmail',
+        {
+          to: options.to,
+          subject: options.subject,
+          template: options.template,
+          context: options.context,
+          html: options.html,
+          text: options.text,
+          headers: {
+            ...(listUnsubscribe ? { 'List-Unsubscribe': listUnsubscribe } : {}),
+          },
+        },
+        {
+          attempts: 3,
+          backoff: {
+            type: 'exponential',
+            delay: 5000,
+          },
+          removeOnComplete: true,
+          removeOnFail: false,
+        },
+      );
+
+      this.logger.log(`📧 Email to ${options.to} queued for subject: ${options.subject}`);
+    } catch (err: unknown) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.logger.error(`❌ Failed to queue email to ${options.to}: ${error.message}`);
+      throw error;
+    }
+  }
+
+  async sendLocalizedEmail(
+    to: string,
+    templateKey: string,
+    userId: string,
+    params?: Record<string, string | number>,
+  ): Promise<void> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { languagePreference: true },
+    });
+
+    const language = user?.languagePreference || 'en';
+    const translated = this.i18nService.translate(
+      templateKey,
+      { userPreference: language },
+      params,
+    );
+
+    await this.sendEmail({
+      to,
+      subject: translated,
+      template: templateKey.replace('.', '-'),
+      context: params,
+      userId,
+      language,
+    });
   }
 }

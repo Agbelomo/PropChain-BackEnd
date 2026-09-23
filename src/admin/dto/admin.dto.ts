@@ -1,6 +1,28 @@
 import { Type } from 'class-transformer';
-import { ArrayMinSize, IsArray, IsEnum, IsInt, IsOptional, IsString, IsUUID, Max, Min } from 'class-validator';
-import { PropertyStatus, TransactionStatus, TransactionType, UserRole } from '../../types/prisma.types';
+import {
+  ArrayMinSize,
+  IsArray,
+  IsEnum,
+  IsInt,
+  IsOptional,
+  IsPhoneNumber,
+  IsString,
+  IsUUID,
+  Max,
+  Min,
+} from 'class-validator';
+import {
+  FraudAlertsQueryDto,
+  ReviewFraudAlertDto,
+  AddFraudInvestigationNoteDto,
+  BlockFraudUserDto,
+} from '../../fraud/dto/fraud.dto';
+import {
+  PropertyStatus,
+  TransactionStatus,
+  TransactionType,
+  UserRole,
+} from '../../types/prisma.types';
 
 export class AdminUsersQueryDto {
   @IsOptional()
@@ -23,6 +45,10 @@ export class AdminUsersQueryDto {
   @Min(1)
   @Max(100)
   limit: number = 20;
+
+  @IsOptional()
+  @IsString()
+  cursor?: string;
 }
 
 export class AdminUpdateUserDto {
@@ -35,7 +61,7 @@ export class AdminUpdateUserDto {
   lastName?: string;
 
   @IsOptional()
-  @IsString()
+  @IsPhoneNumber(undefined, { message: 'Please provide a valid phone number' })
   phone?: string;
 
   @IsOptional()
@@ -44,6 +70,9 @@ export class AdminUpdateUserDto {
 
   @IsOptional()
   isVerified?: boolean;
+
+  @IsOptional()
+  isBlocked?: boolean;
 }
 
 export class ModerationQueueQueryDto {
@@ -63,6 +92,10 @@ export class ModerationQueueQueryDto {
   @Min(1)
   @Max(100)
   limit: number = 20;
+
+  @IsOptional()
+  @IsString()
+  cursor?: string;
 }
 
 export class FlagPropertyDto {
@@ -116,4 +149,20 @@ export class TransactionMonitoringQueryDto {
   @Min(1)
   @Max(100)
   limit: number = 20;
+
+  @IsOptional()
+  @IsString()
+  cursor?: string;
 }
+
+export class UpdateTransactionStatusDto {
+  @IsEnum(TransactionStatus)
+  status!: TransactionStatus;
+}
+
+export {
+  AddFraudInvestigationNoteDto,
+  BlockFraudUserDto,
+  FraudAlertsQueryDto,
+  ReviewFraudAlertDto,
+};

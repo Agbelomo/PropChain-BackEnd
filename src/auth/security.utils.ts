@@ -31,6 +31,10 @@ export function sanitizeUser<T extends Record<string, unknown>>(user: T) {
   return safeUser;
 }
 
+export function redactEmail(email: string): string {
+  return createSha256(email).slice(0, 8);
+}
+
 export function createSha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
 }
@@ -74,11 +78,6 @@ export function decodeBase32(input: string): Buffer {
 
 export function generateBackupCodes(count = 8): string[] {
   return Array.from({ length: count }, () => randomBytes(4).toString('hex').toUpperCase());
-}
-
-export function getPasswordHistoryLimit(): number {
-  const parsed = Number(process.env.PASSWORD_HISTORY_LIMIT ?? 5);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 5;
 }
 
 export function verifyBackupCode(candidate: string, backupCodeHashes: string[]) {
@@ -146,6 +145,12 @@ export function verifyTotpCode({
   }
 
   return false;
+}
+
+export function generateReactivationToken(): { token: string; hash: string } {
+  const token = randomToken(32);
+  const hash = createSha256(token);
+  return { token, hash };
 }
 
 export function parseDuration(input: string, fallbackSeconds: number): number {

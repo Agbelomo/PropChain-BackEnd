@@ -1,7 +1,7 @@
-import { Injectable, BadRequestException, Logger } from '@nestjs/common';
+import { ForbiddenException, Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { promises as fs } from 'fs';
-import { join } from 'path';
+import { isAbsolute, join, relative, resolve } from 'path';
 import { createHash } from 'crypto';
 
 // Multer type definition
@@ -57,11 +57,16 @@ export class AvatarUploadService {
 
     // Create user-specific directory
     const userDir = join(this.uploadDir, userId);
+    const resolvedUserDir = resolve(userDir);
     await fs.mkdir(userDir, { recursive: true });
 
     // Save original file
     const originalPath = join(userDir, filename);
-    await fs.writeFile(originalPath, file.buffer);
+    const resolvedOriginalPath = resolve(originalPath);
+    if (!resolvedOriginalPath.startsWith(resolvedUserDir)) {
+      throw new ForbiddenException('Avatar path traversal not allowed');
+    }
+    await fs.writeFile(resolvedOriginalPath, file.buffer);
 
     // Generate different sizes (simplified version - in production you'd use sharp)
     await this.generateAvatarSizes(originalPath, userDir, filename);
@@ -84,14 +89,30 @@ export class AvatarUploadService {
 
   async deleteAvatar(userId: string, filename: string): Promise<void> {
     const userDir = join(this.uploadDir, userId);
+    const resolvedUserDir = resolve(userDir);
+
+    if (!/^[A-Za-z0-9._-]+$/.test(filename)) {
+      throw new BadRequestException('Invalid filename');
+    }
 
     try {
       // Delete all size variants
       const sizes = ['small_', 'medium_', 'large_', ''];
       for (const prefix of sizes) {
         const filePath = join(userDir, `${prefix}${filename}`);
+        const resolvedFilePath = resolve(filePath);
+        const normalizedRelativePath = relative(resolvedUserDir, resolvedFilePath);
+
+        if (
+          normalizedRelativePath.startsWith('..') ||
+          isAbsolute(normalizedRelativePath) ||
+          normalizedRelativePath === ''
+        ) {
+          throw new BadRequestException('Invalid filename');
+        }
+
         try {
-          await fs.unlink(filePath);
+          await fs.unlink(resolvedFilePath);
         } catch (error) {
           // File might not exist, continue
         }
@@ -107,6 +128,9 @@ export class AvatarUploadService {
       this.logger.log(`Avatar deleted successfully for user ${userId}`);
     } catch (error) {
       this.logger.error(`Error deleting avatar for user ${userId}:`, error);
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
       throw new BadRequestException('Failed to delete avatar');
     }
   }

@@ -17,6 +17,12 @@ enum UserRole {
   ADMIN
 }
 
+enum UserTier {
+  FREE
+  PREMIUM
+  ENTERPRISE
+}
+
 enum TokenType {
   ACCESS
   REFRESH
@@ -31,6 +37,7 @@ enum PropertyStatus {
   SOLD
   RENTED
   ARCHIVED
+  EXPIRED
 }
 
 // Transaction types
@@ -45,6 +52,13 @@ enum TransactionStatus {
   PENDING
   COMPLETED
   CANCELLED
+}
+
+// Refund status for cancelled transactions
+enum RefundStatus {
+  NONE
+  PENDING
+  PROCESSED
   FAILED
 }
 
@@ -66,15 +80,105 @@ enum VerificationStatus {
   REJECTED
 }
 
+enum FraudSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum FraudStatus {
+  OPEN
+  INVESTIGATING
+  RESOLVED
+  DISMISSED
+}
+
+enum FraudPattern {
+  EXCESSIVE_FAILED_LOGINS
+  SHARED_IP_MULTIPLE_ACCOUNTS
+  MULTIPLE_IPS_FOR_ACCOUNT
+  NEW_DEVICE_LOGIN
+  TOKEN_REUSE
+  RAPID_PROPERTY_LISTINGS
+  DUPLICATE_PROPERTY_ADDRESS
+  HIGH_VALUE_NEW_ACCOUNT_LISTING
+  DUPLICATE_PROPERTY_IMAGES
+  // #961 — fraud detection enhancements
+  VELOCITY_EXCEEDED
+  IMPOSSIBLE_TRAVEL
+  DEVICE_FINGERPRINT_MISMATCH
+}
+
+enum BackupStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum BackupTrigger {
+  MANUAL
+  SCHEDULED
+}
+
+enum RestoreStatus {
+  IDLE
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum NotificationStatus {
+  PENDING
+  DELIVERED
+  READ
+}
+
+enum EmailStatus {
+  ACTIVE
+  BOUNCED
+  INVALID
+}
+
+enum BounceType {
+  HARD
+  SOFT
+}
+
+enum DigestFrequency {
+  DAILY
+  WEEKLY
+}
+
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED
+  CANCELLED
+}
+
+enum MilestoneStatus {
+  PENDING
+  COMPLETED
+  DELAYED
+}
+
+enum DocumentStatus {
+  ACTIVE
+  EXPIRED
+  ARCHIVED
+}
+
 // User model
 model User {
   id                       String    @id @default(uuid())
   email                    String    @unique
-  password                 String
+  password                 String?
+  googleId                 String?   @unique @map("google_id")
   firstName                String    @map("first_name")
   lastName                 String    @map("last_name")
   phone                    String?
-  role                     UserRole  @default(USER)
   isVerified               Boolean   @default(false) @map("is_verified")
   isBlocked                Boolean   @default(false) @map("is_blocked")
   isDeactivated            Boolean   @default(false) @map("is_deactivated")
@@ -83,10 +187,15 @@ model User {
   twoFactorEnabled         Boolean   @default(false) @map("two_factor_enabled")
   twoFactorSecret          String?   @map("two_factor_secret")
   twoFactorBackupCodes     String[]  @default([]) @map("two_factor_backup_codes")
+  // NOTE: added to satisfy code references; CI-prone strict mode workaround
+  role                     UserRole  @default(USER) @map("role")
+  tier                     UserTier  @default(FREE) @map("tier")
   avatar                   String?
   pendingEmail             String?   @map("pending_email")
   emailVerificationToken   String?   @map("email_verification_token")
   emailVerificationExpires DateTime? @map("email_verification_expires")
+  reactivationToken        String?   @map("reactivation_token")
+  reactivationTokenExpires DateTime? @map("reactivation_token_expires")
   trustScore               Int       @default(0) @map("trust_score")
   lastTrustScoreUpdate     DateTime? @map("last_trust_score_update")
   createdAt                DateTime  @default(now()) @map("created_at")
@@ -98,47 +207,151 @@ model User {
   contactHours             Json?     @map("contact_hours")
   referralCode             String?   @unique @map("referral_code")
   referredById             String?   @map("referred_by_id")
+  // #960 — account deletion workflow
+  deletionReason           String?   @map("deletion_reason") @db.Text
+  legalHold                Boolean   @default(false) @map("legal_hold")
 
   // Relations
-  properties            Property[]
-  buyerTransactions     Transaction[]          @relation("BuyerTransactions")
-  sellerTransactions    Transaction[]          @relation("SellerTransactions")
-  documents             Document[]
-  apiKeys               ApiKey[]
-  passwordHistory       PasswordHistory[]
-  blacklistedTokens     BlacklistedToken[]
-  preferences           UserPreferences?
-  activityLogs          ActivityLog[]
-  verificationDocuments VerificationDocument[]
-  sessions              Session[]
-  passwordResetTokens   PasswordResetToken[]
-  loginHistory          LoginHistory[]
-  referrals             User[]                 @relation("Referrals")
-  referredBy            User?                  @relation("Referrals", fields: [referredById], references: [id])
+  properties              Property[]
+  propertyAgents          PropertyAgent[]
+  commissions             Commission[]
+  buyerTransactions       Transaction[]            @relation("BuyerTransactions")
+  sellerTransactions      Transaction[]            @relation("SellerTransactions")
+  cancelledTransactions   Transaction[]            @relation("CancelledTransactions")
+  documents               Document[]
+  apiKeys                 ApiKey[]
+  passwordHistory         PasswordHistory[]
+  blacklistedTokens       BlacklistedToken[]
+  preferences             UserPreferences?
+  activityLogs            ActivityLog[]
+  documentVersions        DocumentVersion[] @relation("DocumentVersionUploader")
+  verificationDocuments   VerificationDocument[]
+  sessions                Session[]
+  passwordResetTokens     PasswordResetToken[]
+  loginHistory            LoginHistory[]
+  fraudAlerts             FraudAlert[]             @relation("FraudAlertSubjectUser")
+  assignedFraudAlerts     FraudAlert[]             @relation("FraudAlertAssignedTo")
+  resolvedFraudAlerts     FraudAlert[]             @relation("FraudAlertResolvedBy")
+  fraudInvestigationNotes FraudInvestigationNote[]
+  referrals               User[]                   @relation("Referrals")
+  referredBy              User?                    @relation("Referrals", fields: [referredById], references: [id])
+  savedFilters            SavedFilter[]
+  searchAnalytics         SearchAnalytics[]
+  searchHistory           SearchHistory[]
+  initiatedBackups        DatabaseBackup[]         @relation("BackupInitiatedBy")
+  restoredBackups         DatabaseBackup[]         @relation("BackupRestoredBy")
+  emailStatus             EmailStatus              @default(ACTIVE) @map("email_status")
+  fcmToken                String?                  @map("fcm_token")
+  notifications           Notification[]
+  disputeInitiated        Dispute[]                @relation("DisputeInitiator")
+  disputeArbitrated       Dispute[]                @relation("DisputeArbitrator")
+  linkClicks              LinkClick[]
+  emailEngagements        EmailEngagement[]
+  emailBounces            EmailBounce[]
+  digestPreference        DigestPreference?
+  createdTaxStrategies    TransactionTaxStrategy[] @relation("CreatedTransactionTaxStrategies")
+  transactionHistory      TransactionHistory[]
+  favorites               PropertyFavorite[]
+  propertyViews           PropertyView[]
+  openHouseRsvps             OpenHouseRsvp[]
+  webhooks                Webhook[]
+  tourRequests            TourRequest[]          @relation("TourRequestRequester")
+  tourAgentAssignments    TourRequest[]          @relation("TourRequestAgent")
+  agentAvailabilities     AgentAvailability[]
+  supportTickets          SupportTicket[]       @relation("SupportTicketUser")
+  assignedTickets         SupportTicket[]        @relation("SupportTicketAgent")
+  supportTicketNotes      SupportTicketNote[]
+  transactionNotes        TransactionNote[]            @relation("TransactionNoteAuthor")
+  deletedProperties       Property[]               @relation("DeletedProperties")
+  deletedTransactions     Transaction[]            @relation("DeletedTransactions")
+  deletedDocuments        Document[]               @relation("DeletedDocuments")
+  priceChanges            PropertyPriceHistory[]    @relation("PriceChangeAuthor")
+  comparisonShares        ComparisonShare[]
+  // #960 — account deletion audit trail
+  deletionAuditEntries    AccountDeletionAudit[]   @relation("AccountDeletionAuditUser")
 
   @@index([email])
-  @@index([role])
   @@index([isDeactivated])
   @@index([scheduledDeletionAt])
   @@index([referralCode])
+  @@index([legalHold])
   @@map("users")
 }
 
-model ApiKey {
-  id         String    @id @default(uuid())
-  userId     String    @map("user_id")
-  name       String
-  keyPrefix  String    @map("key_prefix")
-  keyHash    String    @unique @map("key_hash")
-  permissions String[] @default([])
-  usageCount Int       @default(0) @map("usage_count")
-  lastUsedAt DateTime? @map("last_used_at")
-  expiresAt  DateTime? @map("expires_at")
-  revokedAt  DateTime? @map("revoked_at")
-  createdAt  DateTime  @default(now()) @map("created_at")
-  updatedAt  DateTime  @updatedAt @map("updated_at")
+// #960 — audit logs for account deletion events
+model AccountDeletionAudit {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  action     String // REQUESTED, CANCELLED, PERFORMED, RESTORED, LEGAL_HOLD_BLOCKED
+  actorId    String?  @map("actor_id") // Nullable for self-service actions
+  reason     String?  @db.Text
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at")
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User? @relation("AccountDeletionAuditUser", fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([action])
+  @@map("account_deletion_audit")
+}
+
+model DatabaseBackup {
+  id            String        @id @default(uuid())
+  filename      String        @unique
+  filePath      String        @map("file_path")
+  status        BackupStatus  @default(PENDING)
+  trigger       BackupTrigger
+  sizeBytes     BigInt?       @map("size_bytes")
+  checksum      String?
+  startedAt     DateTime      @default(now()) @map("started_at")
+  completedAt   DateTime?     @map("completed_at")
+  errorMessage  String?       @map("error_message") @db.Text
+  initiatedById String?       @map("initiated_by_id")
+  restoreStatus RestoreStatus @default(IDLE) @map("restore_status")
+  restoredAt    DateTime?     @map("restored_at")
+  restoreError  String?       @map("restore_error") @db.Text
+  restoredById  String?       @map("restored_by_id")
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+
+  initiatedBy User? @relation("BackupInitiatedBy", fields: [initiatedById], references: [id], onDelete: SetNull)
+  restoredBy  User? @relation("BackupRestoredBy", fields: [restoredById], references: [id], onDelete: SetNull)
+
+  @@index([status, startedAt])
+  @@index([restoreStatus, restoredAt])
+  @@index([trigger, createdAt])
+  @@map("database_backups")
+}
+
+model BackupScheduleConfig {
+  id             String    @id
+  enabled        Boolean   @default(false)
+  cronExpression String    @map("cron_expression")
+  retentionCount Int       @default(10) @map("retention_count")
+  lastRunAt      DateTime? @map("last_run_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@map("backup_schedule_configs")
+}
+
+model ApiKey {
+  id            String    @id @default(uuid())
+  userId        String    @map("user_id")
+  name          String
+  keyPrefix     String    @map("key_prefix")
+  keyHash       String    @unique @map("key_hash")
+  permissions   String[]  @default([])
+  usageCount    Int       @default(0) @map("usage_count")
+  monthlyQuota  Int?      @map("monthly_quota")
+  lastUsedAt    DateTime? @map("last_used_at")
+  expiresAt     DateTime? @map("expires_at")
+  revokedAt     DateTime? @map("revoked_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  usageDaily ApiKeyUsageDaily[]
 
   @@index([userId])
   @@index([keyPrefix])
@@ -244,92 +457,396 @@ model Property {
   lotSize      Decimal?       @map("lot_size")
   yearBuilt    Int?           @map("year_built")
   status       PropertyStatus @default(DRAFT)
+  deleted      Boolean        @default(false)
+  deletedAt    DateTime?      @map("deleted_at")
+  deletedById  String?        @map("deleted_by_id")
   ownerId      String         @map("owner_id")
+  neighborhoodId String?      @map("neighborhood_id")
   latitude     Float?
   longitude    Float?
-  features     String[] // Array of features (pool, garage, etc.)
-  createdAt    DateTime       @default(now()) @map("created_at")
-  updatedAt    DateTime       @updatedAt @map("updated_at")
+  features        String[] // Array of features (pool, garage, etc.)
+  category        String?
+  tags            String[]       @default([])
+  virtualTourUrl  String?        @map("virtual_tour_url")
+  videoUrl        String?        @map("video_url")
+  hoaName         String?        @map("hoa_name")
+  hoaMonthlyFee   Decimal?       @map("hoa_monthly_fee")
+  hoaAmenities    String[]       @default([]) @map("hoa_amenities")
+  hoaContactInfo  String?        @map("hoa_contact_info")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+  viewCount    Int            @default(0) @map("view_count")
+
+    // Property Tax Information
+    annualTaxAmount   Decimal?       @map("annual_tax_amount") // Annual property tax amount
+    expiryDate        DateTime?       @map("expiry_date") // when the listing expires
+    taxAssessmentValue Decimal?      @map("tax_assessment_value") // Assessed value for tax purposes
+    taxRate           Decimal?       @map("tax_rate") // Tax rate applied to property
+    taxHistory        Json?          @map("tax_history") // Historical tax records (array of objects)
+
+      // Investment Analysis Metrics
+      capRate          Decimal?       @map("cap_rate") // Capitalization rate
+      roi              Decimal?       @map("roi") // Return on investment
+      rentalYield      Decimal?       @map("rental_yield") // Rental yield percentage
+      cashFlow         Decimal?       @map("cash_flow") // Annual cash flow
 
   // Relations
-  owner        User          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  owner        User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   transactions Transaction[]
   documents    Document[]
+  images       PropertyImage[]
+  fraudAlerts  FraudAlert[]
+  agents       PropertyAgent[]
+  commissions  Commission[]
+  duplicates   PropertyDuplicate[] @relation("DuplicateProperty")
+  duplicateOf  PropertyDuplicate[] @relation("DuplicateTarget")
+  mergedInto   PropertyDuplicate[] @relation("MergedProperty")
+  favorites    PropertyFavorite[]
+  views        PropertyView[]
+  openHouses   OpenHouse[]
+  tourRequests TourRequest[]
+  neighborhood Neighborhood?      @relation(fields: [neighborhoodId], references: [id], onDelete: SetNull)
+  amenities    PropertyAmenity[]
+  deletedBy    User?            @relation("DeletedProperties", fields: [deletedById], references: [id], onDelete: SetNull)
+  priceHistory PropertyPriceHistory[]
 
   @@index([ownerId])
   @@index([status])
+  @@index([deleted])
   @@index([city, state])
   @@index([price])
   @@index([propertyType])
+  @@index([viewCount])
+  @@index([neighborhoodId])
   @@map("properties")
+}
+
+// Property gallery image with optimized variants and ordering (#TASK2)
+model PropertyImage {
+  id           String   @id @default(uuid())
+  propertyId   String   @map("property_id")
+  url          String   // optimized full-size variant
+  thumbnailUrl String   @map("thumbnail_url")
+  mediumUrl    String   @map("medium_url")
+  filename     String
+  mimeType     String   @map("mime_type")
+  size         Int      // bytes (optimized full-size)
+  width        Int?
+  height       Int?
+  order        Int      @default(0)
+  isPrimary    Boolean  @default(false) @map("is_primary")
+  uniqueHash   String?  @map("unique_hash") // Perceptual hash for duplicate detection
+  altText      String?  @map("alt_text")
+  caption      String?
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@index([propertyId, order])
+  @@index([propertyId, isPrimary])
+  @@index([uniqueHash])
+  @@map("property_images")
+}
+
+model PropertyFavorite {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  propertyId String   @map("property_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, propertyId])
+  @@index([userId, createdAt])
+  @@index([propertyId])
+  @@map("property_favorites")
+}
+
+// Property price history tracking
+model PropertyPriceHistory {
+  id              String   @id @default(uuid())
+  propertyId      String   @map("property_id")
+  oldPrice        Decimal  @map("old_price")
+  newPrice        Decimal  @map("new_price")
+  changeAmount    Decimal  @map("change_amount")
+  changePercentage Float   @map("change_percentage")
+  changedBy       String?  @map("changed_by")
+  changeReason    String?  @map("change_reason") @db.Text
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  changedByUser User? @relation("PriceChangeAuthor", fields: [changedBy], references: [id], onDelete: SetNull)
+
+  @@index([propertyId, createdAt])
+  @@index([createdAt])
+  @@map("property_price_history")
+}
+
+model PropertyView {
+  id         String   @id @default(uuid())
+  propertyId String   @map("property_id")
+  userId     String?  @map("user_id")
+  ipAddress  String?  @map("ip_address")
+  userAgent  String?  @map("user_agent")
+  referrer   String?
+  sessionId  String?  @map("session_id")
+  viewedAt   DateTime @default(now()) @map("viewed_at")
+
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  user     User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([propertyId, viewedAt])
+  @@index([propertyId, userId, viewedAt])
+  @@index([userId])
+  @@index([ipAddress])
+  @@map("property_views")
+}
+
+model Neighborhood {
+  id           String   @id @default(uuid())
+  name         String
+  city         String
+  state        String
+  country      String   @default("USA")
+  walkScore    Int?     @map("walk_score")
+  transitScore Int?     @map("transit_score")
+  bikeScore    Int?     @map("bike_score")
+  crimeIndex   Float?   @map("crime_index")
+  crimeRate    Json?    @map("crime_rate")
+  schoolRating Float?   @map("school_rating")
+  description  String?
+  metadata     Json?
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  properties Property[]
+  schools    NeighborhoodSchool[]
+  amenities  NeighborhoodAmenity[]
+
+  @@unique([name, city, state])
+  @@index([city, state])
+  @@map("neighborhoods")
+}
+
+model NeighborhoodSchool {
+  id                  String   @id @default(uuid())
+  neighborhoodId      String   @map("neighborhood_id")
+  name                String
+  type                String
+  rating              Float
+  distanceMiles       Float?   @map("distance_miles")
+  studentTeacherRatio Float?   @map("student_teacher_ratio")
+  enrollmentCount     Int?     @map("enrollment_count")
+  url                 String?
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  neighborhood Neighborhood @relation(fields: [neighborhoodId], references: [id], onDelete: Cascade)
+
+  @@index([neighborhoodId])
+  @@index([type])
+  @@map("neighborhood_schools")
+}
+
+model NeighborhoodAmenity {
+  id             String   @id @default(uuid())
+  neighborhoodId String   @map("neighborhood_id")
+  category       String
+  name           String
+  distanceMiles  Float?   @map("distance_miles")
+  rating         Float?
+  address        String?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  neighborhood Neighborhood @relation(fields: [neighborhoodId], references: [id], onDelete: Cascade)
+
+  @@index([neighborhoodId])
+  @@index([category])
+  @@map("neighborhood_amenities")
 }
 
 // Transaction model
 model Transaction {
-  id              String            @id @default(uuid())
-  propertyId      String            @map("property_id")
-  buyerId         String            @map("buyer_id")
-  sellerId        String            @map("seller_id")
-  amount          Decimal
-  type            TransactionType
-  status          TransactionStatus @default(PENDING)
-  blockchainHash  String?           @map("blockchain_hash")
-  contractAddress String?           @map("contract_address")
-  notes           String?
-  createdAt       DateTime          @default(now()) @map("created_at")
-  updatedAt       DateTime          @updatedAt @map("updated_at")
+  id                 String            @id @default(uuid())
+  propertyId         String            @map("property_id")
+  buyerId            String            @map("buyer_id")
+  sellerId           String            @map("seller_id")
+  amount             Decimal
+  type               TransactionType
+  status             TransactionStatus @default(PENDING)
+  blockchainHash     String?           @map("blockchain_hash")
+  contractAddress    String?           @map("contract_address")
+  notes              String?
+  // Fee breakdown (#565)
+  feeBreakdown       Json?             @map("fee_breakdown")
+  // Escrow and payment tracking (#561)
+  escrowStatus     String?   @map("escrow_status") // PENDING, HELD, RELEASED, REFUNDED
+  escrowAmount     Decimal?  @map("escrow_amount")
+  escrowReleasedAt DateTime? @map("escrow_released_at")
+  paymentStatus    String?   @map("payment_status") // PENDING, PARTIAL, COMPLETE
+  // Cancellation (#361)
+  cancellationReason String?           @map("cancellation_reason")
+  cancelledById      String?           @map("cancelled_by_id")
+  cancelledAt        DateTime?         @map("cancelled_at")
+  refundAmount       Decimal?          @map("refund_amount")
+  refundStatus       RefundStatus      @default(NONE) @map("refund_status")
+  // Soft-delete (#918)
+  deleted            Boolean           @default(false)
+  deletedAt          DateTime?         @map("deleted_at")
+  deletedById        String?           @map("deleted_by_id")
+  createdAt          DateTime          @default(now()) @map("created_at")
+  updatedAt          DateTime          @updatedAt @map("updated_at")
 
   // Relations
-  property Property @relation(fields: [propertyId], references: [id])
-  buyer    User     @relation("BuyerTransactions", fields: [buyerId], references: [id])
-  seller   User     @relation("SellerTransactions", fields: [sellerId], references: [id])
-
+  property              Property                 @relation(fields: [propertyId], references: [id])
+  commissions           Commission[]
+  buyer                 User                     @relation("BuyerTransactions", fields: [buyerId], references: [id])
+  seller                User                     @relation("SellerTransactions", fields: [sellerId], references: [id])
+  cancelledBy           User?                    @relation("CancelledTransactions", fields: [cancelledById], references: [id])
+  deletedBy             User?                    @relation("DeletedTransactions", fields: [deletedById], references: [id], onDelete: SetNull)
+  fraudAlerts           FraudAlert[]
+  taxStrategies         TransactionTaxStrategy[]
+  disputes              Dispute[]
+  transactionMilestones TransactionMilestone[]
+  transactionHistory    TransactionHistory[]
+  transactionNotes      TransactionNote[]
   @@index([propertyId])
   @@index([buyerId])
   @@index([sellerId])
+  @@index([buyerId, sellerId])
   @@index([status])
+  @@index([deleted])
   @@index([blockchainHash])
   @@map("transactions")
 }
 
+model TransactionTaxStrategy {
+  id                 String   @id @default(uuid())
+  transactionId      String   @map("transaction_id")
+  createdById        String?  @map("created_by_id")
+  strategyType       String   @map("strategy_type")
+  jurisdiction       String?
+  estimatedTaxRate   Decimal? @map("estimated_tax_rate")
+  estimatedTaxImpact Decimal? @map("estimated_tax_impact")
+  explanation        String   @db.Text
+  metadata           Json?
+  version            Int      @default(1)
+  informationalOnly  Boolean  @default(true) @map("informational_only")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  createdBy   User?       @relation("CreatedTransactionTaxStrategies", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([transactionId, updatedAt])
+  @@index([createdById])
+  @@index([strategyType])
+  @@map("transaction_tax_strategies")
+}
+
 // Document model
 model Document {
-  id           String       @id @default(uuid())
-  propertyId   String?      @map("property_id")
-  userId       String       @map("user_id")
-  documentType DocumentType @map("document_type")
-  fileName     String       @map("file_name")
-  fileUrl      String       @map("file_url")
-  fileSize     Int          @map("file_size") // in bytes
-  mimeType     String       @map("mime_type")
-  description  String?
-  createdAt    DateTime     @default(now()) @map("created_at")
-  updatedAt    DateTime     @updatedAt @map("updated_at")
+  id             String       @id @default(uuid())
+  propertyId     String?      @map("property_id")
+  transactionId  String?      @map("transaction_id") // #354
+  userId         String       @map("user_id")
+  documentType   DocumentType @map("document_type")
+  fileName       String       @map("file_name")
+  fileUrl        String       @map("file_url")
+  fileSize       Int          @map("file_size") // in bytes
+  mimeType       String       @map("mime_type")
+  description    String?
+  stage          String?  // transaction lifecycle stage (#559)
+  // Categorization (#401)
+  category       String?
+  tags           String[]     @default([])
+  // Access Control (#570)
+  isPublic       Boolean      @default(false) @map("is_public")
+  sharedWith     String[]     @default([]) @map("shared_with")
+  // Expiration (#402)
+  expiresAt      DateTime?    @map("expires_at")
+  isExpired      Boolean      @default(false) @map("is_expired")
+  expiryNotified Boolean      @default(false) @map("expiry_notified")
+  // Archival Workflow (#573)
+  status         DocumentStatus @default(ACTIVE)
+  archivedAt     DateTime?    @map("archived_at")
+  // Soft-delete (#918)
+  deleted        Boolean      @default(false)
+  deletedAt      DateTime?    @map("deleted_at")
+  deletedById    String?      @map("deleted_by_id")
+  // eSignature (#403)
+  signedBy       String?      @map("signed_by")
+  signedAt       DateTime?    @map("signed_at")
+  signatureHash  String?      @map("signature_hash")
+  auditTrail     Json         @default("[]") @map("audit_trail")
+  disputeId      String?      @map("dispute_id")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
 
   // Relations
-  property Property? @relation(fields: [propertyId], references: [id], onDelete: SetNull)
-  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  property Property?       @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+  user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dispute  Dispute?        @relation(fields: [disputeId], references: [id], onDelete: SetNull)
+  deletedBy User?          @relation("DeletedDocuments", fields: [deletedById], references: [id], onDelete: SetNull)
+  versions DocumentVersion[]
 
   @@index([propertyId])
+  @@index([transactionId])
   @@index([userId])
   @@index([documentType])
+  @@index([category])
+  @@index([isExpired])
+  @@index([expiresAt])
+  @@index([deleted])
   @@map("documents")
+}
+
+// Persisted version history for documents (#354)
+model DocumentVersion {
+  id           String   @id @default(uuid())
+  documentId   String   @map("document_id")
+  versionNumber Int     @map("version_number")
+  fileUrl      String   @map("file_url")
+  fileName     String   @map("file_name")
+  fileSize     Int      @map("file_size")
+  uploadedById String?  @map("uploaded_by_id")
+  changeNote   String?  @map("change_note")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  uploadedBy User?    @relation("DocumentVersionUploader", fields: [uploadedById], references: [id], onDelete: SetNull)
+
+  @@unique([documentId, versionNumber])
+  @@index([documentId, createdAt])
+  @@map("document_versions")
 }
 
 // User Preferences model
 model UserPreferences {
-  id                 String   @id @default(uuid())
-  userId             String   @unique @map("user_id")
-  language           String   @default("en")
-  currency           String   @default("USD")
-  timezone           String   @default("UTC")
-  emailNotifications Boolean  @default(true) @map("email_notifications")
-  smsNotifications   Boolean  @default(false) @map("sms_notifications")
-  propertyAlerts     Boolean  @default(true) @map("property_alerts")
-  marketUpdates      Boolean  @default(true) @map("market_updates")
-  theme              String   @default("light")
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
+  id                     String   @id @default(uuid())
+  userId                 String   @unique @map("user_id")
+  language               String   @default("en")
+  currency               String   @default("USD")
+  timezone               String   @default("UTC")
+  emailNotifications     Boolean  @default(true) @map("email_notifications")
+  smsNotifications       Boolean  @default(false) @map("sms_notifications")
+  inAppNotifications     Boolean  @default(true) @map("in_app_notifications")
+  pushNotifications      Boolean  @default(false) @map("push_notifications")
+  propertyAlerts         Boolean  @default(true) @map("property_alerts")
+  marketUpdates          Boolean  @default(true) @map("market_updates")
+  theme                  String   @default("light")
+  // Notification preferences (#370)
+  notificationFrequency  String   @default("INSTANT") @map("notification_frequency") // INSTANT | HOURLY | DAILY | WEEKLY
+  notificationEventTypes String[] @default([]) @map("notification_event_types") // e.g. ["TRANSACTION_UPDATE","PROPERTY_ALERT","MARKET_UPDATE","DISPUTE","SYSTEM"]
+  quietHoursEnabled      Boolean  @default(false) @map("quiet_hours_enabled")
+  quietHoursStart        String?  @map("quiet_hours_start") // "HH:MM" in user timezone
+  quietHoursEnd          String?  @map("quiet_hours_end") // "HH:MM" in user timezone
+  perEventSettings       Json?    @map("per_event_settings") // fine-grained per-event channel overrides
+optOutReminders          Boolean  @default(false) @map("opt_out_reminders") // #563
+  searchAnalyticsOptOut    Boolean  @default(false) @map("search_analytics_opt_out") // #1184
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -367,6 +884,13 @@ model Session {
   refreshTokenJti String?   @map("refresh_token_jti")
   ipAddress       String?   @map("ip_address")
   userAgent       String?   @map("user_agent")
+  displayName     String?   @map("display_name")
+  deviceInfo      Json?     @map("device_info")
+  geoLocation     Json?     @map("geo_location")
+  // #961 — fraud detection enhancements
+  deviceFingerprint String? @map("device_fingerprint")
+  geoCountryCode    String? @map("geo_country_code")
+  geoCity           String? @map("geo_city")
   isRevoked       Boolean   @default(false) @map("is_revoked")
   revokedAt       DateTime? @map("revoked_at")
   expiresAt       DateTime  @map("expires_at")
@@ -374,12 +898,71 @@ model Session {
   lastActivityAt  DateTime  @default(now()) @map("last_activity_at")
 
   // Relations
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fraudAlerts FraudAlert[]
 
   @@index([userId])
   @@index([expiresAt])
   @@index([isRevoked])
+  @@index([deviceFingerprint])
+  @@index([geoCountryCode])
   @@map("sessions")
+}
+
+model FraudAlert {
+  id              String        @id @default(uuid())
+  userId          String?       @map("user_id")
+  propertyId      String?       @map("property_id")
+  transactionId   String?       @map("transaction_id")
+  sessionId       String?       @map("session_id")
+  pattern         FraudPattern
+  severity        FraudSeverity
+  status          FraudStatus   @default(OPEN)
+  score           Int           @default(0)
+  title           String
+  description     String        @db.Text
+  evidence        Json?
+  autoBlocked     Boolean       @default(false) @map("auto_blocked")
+  firstDetectedAt DateTime      @default(now()) @map("first_detected_at")
+  lastDetectedAt  DateTime      @default(now()) @map("last_detected_at")
+  occurrenceCount Int           @default(1) @map("occurrence_count")
+  assignedToId    String?       @map("assigned_to_id")
+  resolvedById    String?       @map("resolved_by_id")
+  resolvedAt      DateTime?     @map("resolved_at")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+
+  user        User?                    @relation("FraudAlertSubjectUser", fields: [userId], references: [id], onDelete: SetNull)
+  property    Property?                @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+  transaction Transaction?             @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+  session     Session?                 @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  assignedTo  User?                    @relation("FraudAlertAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+  resolvedBy  User?                    @relation("FraudAlertResolvedBy", fields: [resolvedById], references: [id], onDelete: SetNull)
+  notes       FraudInvestigationNote[]
+
+  @@index([status, severity])
+  @@index([userId, status])
+  @@index([propertyId, status])
+  @@index([pattern, status])
+  @@index([lastDetectedAt])
+  @@map("fraud_alerts")
+}
+
+model FraudInvestigationNote {
+  id        String   @id @default(uuid())
+  alertId   String   @map("alert_id")
+  actorId   String?  @map("actor_id")
+  action    String?
+  note      String   @db.Text
+  metadata  Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  alert FraudAlert @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  actor User?      @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([alertId, createdAt])
+  @@index([actorId])
+  @@map("fraud_investigation_notes")
 }
 
 // Verification Document model
@@ -405,3 +988,671 @@ model VerificationDocument {
   @@index([documentType])
   @@map("verification_documents")
 }
+
+// Saved search filters
+model SavedFilter {
+  id            String   @id @default(uuid())
+  userId        String   @map("user_id")
+  name          String
+  filters       Json // Store filter configuration as JSON
+  isQuickFilter Boolean  @default(false) @map("is_quick_filter")
+  usageCount    Int      @default(0) @map("usage_count")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([isQuickFilter])
+  @@map("saved_filters")
+}
+
+// Search analytics
+model SearchAnalytics {
+  id           String   @id @default(uuid())
+  userId       String?  @map("user_id")
+  queryId      String   @unique @map("query_id")
+  query        String?
+  filters      Json? // Store applied filters as JSON
+  resultsCount Int      @default(0) @map("results_count")
+  took         Int      @default(0) // Search time in milliseconds
+  hasResults   Boolean  @default(true) @map("has_results")
+  converted    Boolean  @default(false) @map("converted")
+  ipAddress    String?  @map("ip_address")
+  userAgent    String?  @map("user_agent")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([queryId])
+  @@index([createdAt])
+  @@index([hasResults])
+  @@index([converted])
+  @@map("search_analytics")
+}
+
+// Search history for autocomplete
+model SearchHistory {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  query        String
+  frequency    Int      @default(1) // How many times this query has been searched
+  lastSearched DateTime @default(now()) @map("last_searched")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, query])
+  @@index([userId])
+  @@index([frequency])
+  @@index([lastSearched])
+  @@map("search_history")
+}
+
+// Popular searches (global)
+model PopularSearch {
+  id          String   @id @default(uuid())
+  query       String   @unique
+  frequency   Int      @default(1)
+  trend       String   @default("stable") // up, down, stable
+  lastUpdated DateTime @default(now()) @map("last_updated")
+
+  @@index([frequency])
+  @@index([trend])
+  @@map("popular_searches")
+}
+
+// Search suggestions cache
+model SearchSuggestion {
+  id         String   @id @default(uuid())
+  query      String
+  suggestion String
+  type       String // property, location, feature, recent, popular
+  score      Float    @default(0) // Relevance score
+  expiresAt  DateTime @map("expires_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([query])
+  @@index([type])
+  @@index([score])
+  @@index([expiresAt])
+  @@map("search_suggestions")
+}
+
+model Notification {
+  id          String             @id @default(uuid())
+  userId      String             @map("user_id")
+  title       String
+  message     String
+  type        String
+  status      NotificationStatus @default(PENDING)
+  metadata    Json?
+  createdAt   DateTime           @default(now()) @map("created_at")
+  readAt      DateTime?          @map("read_at")
+  scheduledAt DateTime?          @map("scheduled_at")
+  isRecurring Boolean            @default(false) @map("is_recurring")
+  cron        String?            @map("cron")
+  timezone    String             @default("UTC")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([scheduledAt])
+  @@map("notifications")
+}
+
+model Dispute {
+  id                String        @id @default(uuid())
+  transactionId     String        @map("transaction_id")
+  initiatorId       String        @map("initiator_id")
+  arbitratorId      String?       @map("arbitrator_id")
+  status            DisputeStatus @default(OPEN)
+  reason            String
+  description       String?       @db.Text
+  resolutionDetails String?       @map("resolution_details") @db.Text
+  resolvedAt        DateTime?     @map("resolved_at")
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  initiator   User        @relation("DisputeInitiator", fields: [initiatorId], references: [id])
+  arbitrator  User?       @relation("DisputeArbitrator", fields: [arbitratorId], references: [id])
+  evidence    Document[]
+
+  @@index([transactionId])
+  @@index([initiatorId])
+  @@index([status])
+  @@index([status, transactionId])
+  @@map("disputes")
+}
+
+model TransactionMilestone {
+  id            String          @id @default(uuid())
+  transactionId String          @map("transaction_id")
+  title         String
+  description   String?         @db.Text
+  status        MilestoneStatus @default(PENDING)
+  expectedDate     DateTime        @map("expected_date")
+  actualDate       DateTime?       @map("actual_date")
+  reminderSentAt   DateTime?       @map("reminder_sent_at")
+  createdAt        DateTime        @default(now()) @map("created_at")
+  updatedAt        DateTime        @updatedAt @map("updated_at")
+
+  // Relations
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([transactionId])
+  @@index([status])
+  @@map("transaction_milestones")
+}
+
+model TransactionHistory {
+  id            String            @id @default(uuid())
+  transactionId String            @map("transaction_id")
+  status        TransactionStatus
+  actorId       String?           @map("actor_id")
+  notes         String?           @db.Text
+  metadata      Json?
+  createdAt     DateTime          @default(now()) @map("created_at")
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  actor       User?       @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([transactionId])
+  @@index([createdAt])
+  @@map("transaction_history")
+}
+
+model LinkClick {
+  id        String   @id @default(uuid())
+  url       String
+  userId    String?  @map("user_id")
+  ipAddress String?  @map("ip_address")
+  userAgent String?  @map("user_agent")
+  metadata  Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([url])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("link_clicks")
+}
+
+model EmailEngagement {
+  id         String    @id @default(uuid())
+  trackingId String    @unique @map("tracking_id")
+  userId     String    @map("user_id")
+  emailType  String    @map("email_type")
+  openedAt   DateTime? @map("opened_at")
+  ipAddress  String?   @map("ip_address")
+  userAgent  String?   @map("user_agent")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([trackingId])
+  @@index([createdAt])
+  @@map("email_engagements")
+}
+
+model EmailBounce {
+  id         String     @id @default(uuid())
+  userId     String     @map("user_id")
+  email      String
+  bounceType BounceType @map("bounce_type")
+  reason     String?
+  rawEvent   Json?      @map("raw_event")
+  spamAction SpamAction @default(NONE) @map("spam_action")
+  createdAt  DateTime   @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([email])
+  @@index([bounceType])
+  @@index([spamAction])
+  @@map("email_bounces")
+}
+
+model DigestPreference {
+  id               String          @id @default(uuid())
+  userId           String          @unique @map("user_id")
+  frequency        DigestFrequency @default(DAILY)
+  enabled          Boolean         @default(true)
+  unsubscribeToken String          @unique @map("unsubscribe_token")
+  lastSentAt       DateTime?       @map("last_sent_at")
+  createdAt        DateTime        @default(now()) @map("created_at")
+  updatedAt        DateTime        @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([enabled, frequency])
+  @@map("digest_preferences")
+}
+
+model PropertyAgent {
+  id             String   @id @default(uuid())
+  propertyId     String   @map("property_id")
+  agentId        String   @map("agent_id")
+  commissionRate Decimal  @default(0.03) @map("commission_rate")
+  contactPhone   String?  @map("contact_phone")
+  contactEmail   String?  @map("contact_email")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  agent    User     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([propertyId, agentId])
+  @@map("property_agents")
+}
+
+model Commission {
+  id            String            @id @default(uuid())
+  transactionId String            @map("transaction_id")
+  agentId       String            @map("agent_id")
+  propertyId    String            @map("property_id")
+  amount        Decimal           @map("amount")
+  rate          Decimal           @map("rate")
+  status        TransactionStatus @default(PENDING)
+  createdAt     DateTime          @default(now()) @map("created_at")
+  updatedAt     DateTime          @updatedAt @map("updated_at")
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  agent       User       @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  property    Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@unique([transactionId, agentId])
+  @@map("commissions")
+}
+
+model PropertyAmenity {
+  id          String   @id @default(uuid())
+  propertyId  String   @map("property_id")
+  name        String
+  amenityType String   @map("amenity_type")
+  description String?
+  isAvailable Boolean  @default(true) @map("is_available")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@index([propertyId])
+  @@index([amenityType])
+  @@map("property_amenities")
+}
+
+// Property duplicate detection results
+model PropertyDuplicate {
+  id              String   @id @default(uuid())
+  propertyId      String   @map("property_id")
+  duplicateOfId   String?  @map("duplicate_of_id") // null if unknown match
+  duplicateType    String   @map("duplicate_type") // ADDRESS, IMAGE, ADDRESS_AND_IMAGE
+  confidenceScore Int      @default(0) @map("confidence_score") // 0-100
+  evidence        Json?    @map("evidence") // match details
+  isMerged          Boolean  @default(false) @map("is_merged")
+  mergedIntoId      String?  @map("merged_into_id") // points to surviving property after merge
+  flaggedForReview  Boolean  @default(false) @map("flagged_for_review")
+  reviewNotes       String?  @map("review_notes")
+  isResolved        Boolean  @default(false) @map("is_resolved")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  property    Property @relation("DuplicateProperty", fields: [propertyId], references: [id], onDelete: Cascade)
+  duplicateOf Property? @relation("DuplicateTarget", fields: [duplicateOfId], references: [id], onDelete: SetNull)
+  mergedInto  Property? @relation("MergedProperty", fields: [mergedIntoId], references: [id], onDelete: SetNull)
+
+  @@index([propertyId])
+  @@index([duplicateOfId])
+  @@index([duplicateType])
+  @@index([isMerged])
+  @@map("property_duplicates")
+}
+
+// Transaction notes with visibility rules (#562)
+model TransactionNote {
+  id            String   @id @default(uuid())
+  transactionId String   @map("transaction_id")
+  authorId      String   @map("author_id")
+  content       String   @db.Text
+  isPublic      Boolean  @default(true) @map("is_public")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  author      User        @relation("TransactionNoteAuthor", fields: [authorId], references: [id])
+
+  @@index([transactionId])
+  @@index([authorId])
+  @@map("transaction_notes")
+ }
+
+enum RsvpStatus {
+  ATTENDING
+  DECLINED
+  MAYBE
+}
+
+model OpenHouse {
+  id          String    @id @default(uuid())
+  propertyId  String    @map("property_id")
+  title       String
+  description String?
+  startAt     DateTime  @map("start_at")
+  endAt       DateTime  @map("end_at")
+  isCancelled Boolean   @default(false) @map("is_cancelled")
+  cancelledAt DateTime? @map("cancelled_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  property Property        @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  rsvps    OpenHouseRsvp[]
+
+  @@index([propertyId])
+  @@map("open_houses")
+}
+
+model OpenHouseRsvp {
+  id          String     @id @default(uuid())
+  openHouseId String     @map("open_house_id")
+  userId      String     @map("user_id")
+  status      RsvpStatus @default(ATTENDING)
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+
+  openHouse OpenHouse @relation(fields: [openHouseId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([openHouseId, userId])
+  @@index([openHouseId])
+  @@index([userId])
+  @@map("open_house_rsvps")
+}
+
+model ExportJob {
+  id        String    @id @default(uuid())
+  type      JobType
+  status    JobStatus @default(PENDING)
+  fileUrl   String?   @map("file_url")
+  startedAt DateTime  @default(now()) @map("started_at")
+  completedAt DateTime? @map("completed_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  @@map("export_jobs")
+}
+
+model ComparisonShare {
+  id           String   @id @default(uuid())
+  shareToken   String   @unique @map("share_token")
+  propertyIds  String[] @map("property_ids")
+  createdById  String?  @map("created_by_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+  expiresAt    DateTime? @map("expires_at")
+
+  createdBy User? @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([shareToken])
+  @@index([createdById])
+  @@map("comparison_shares")
+}
+
+enum JobType {
+  EXPORT
+  IMPORT
+  REPORT
+}
+
+enum JobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum SpamAction {
+  NONE
+  COMPLAINED
+  UNSUBSCRIBED
+}
+
+// Daily API key usage aggregation for analytics (#945)
+model ApiKeyUsageDaily {
+  id            String   @id @default(uuid())
+  apiKeyId      String   @map("api_key_id")
+  date          DateTime @db.Date
+  requestCount  Int      @default(0) @map("request_count")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  apiKey ApiKey @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+
+  @@unique([apiKeyId, date])
+  @@index([apiKeyId, date])
+  @@index([date])
+  @@map("api_key_usage_daily")
+}
+
+
+// ─── Webhook Event System (#958) ──────────────────────────────────────────────
+
+enum WebhookStatus {
+  ACTIVE
+  INACTIVE
+  VERIFYING
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  RETRYING
+}
+
+model Webhook {
+  id          String         @id @default(uuid())
+  userId      String         @map("user_id")
+  url         String
+  secret      String
+  events      String[]
+  description String?
+  status      WebhookStatus  @default(ACTIVE)
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+
+  user      User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deliveries WebhookDeliveryLog[]
+
+  @@index([userId])
+  @@index([status])
+  @@map("webhooks")
+}
+
+model WebhookDeliveryLog {
+  id          String                 @id @default(uuid())
+  webhookId   String                 @map("webhook_id")
+  eventType   String                 @map("event_type")
+  payload     Json
+  status      WebhookDeliveryStatus  @default(PENDING)
+  responseCode Int?                  @map("response_code")
+  responseBody String?               @map("response_body") @db.Text
+  attempts    Int                    @default(0)
+  maxAttempts Int                    @default(5)
+  nextRetryAt DateTime?              @map("next_retry_at")
+  error       String?                @db.Text
+  deliveredAt DateTime?              @map("delivered_at")
+  createdAt   DateTime               @default(now()) @map("created_at")
+  updatedAt   DateTime               @updatedAt @map("updated_at")
+
+  webhook Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([webhookId, status])
+  @@index([status, nextRetryAt])
+  @@index([eventType])
+  @@map("webhook_delivery_logs")
+}
+
+// ─── Property Tour Scheduling (#957) ──────────────────────────────────────────
+
+enum TourRequestStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  DECLINED
+}
+
+enum TourType {
+  PRIVATE
+  OPEN_HOUSE
+}
+
+model TourRequest {
+  id          String            @id @default(uuid())
+  propertyId  String            @map("property_id")
+  requesterId String            @map("requester_id")
+  agentId     String?           @map("agent_id")
+  tourType    TourType          @default(PRIVATE) @map("tour_type")
+  status      TourRequestStatus @default(PENDING)
+  requestedAt DateTime          @map("requested_at")
+  confirmedAt DateTime?         @map("confirmed_at")
+  notes       String?           @db.Text
+  timezone    String            @default("UTC")
+  createdAt   DateTime          @default(now()) @map("created_at")
+  updatedAt   DateTime          @updatedAt @map("updated_at")
+
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  requester User    @relation("TourRequestRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  agent     User?   @relation("TourRequestAgent", fields: [agentId], references: [id], onDelete: SetNull)
+
+  @@index([propertyId])
+  @@index([requesterId])
+  @@index([agentId])
+  @@index([status])
+  @@index([requestedAt])
+  @@map("tour_requests")
+}
+
+model AgentAvailability {
+  id        String   @id @default(uuid())
+  agentId   String   @map("agent_id")
+  dayOfWeek Int      @map("day_of_week") // 0=Sun, 6=Sat
+  startTime String   @map("start_time") // "HH:MM"
+  endTime   String   @map("end_time")   // "HH:MM"
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  agent User @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, dayOfWeek])
+  @@map("agent_availabilities")
+}
+
+// ─── Support Tickets with SLAs (#955) ────────────────────────────────────────
+
+enum TicketCategory {
+  GENERAL
+  BILLING
+  TECHNICAL
+  PROPERTY_LISTING
+  TRANSACTION
+  ACCOUNT
+  FRAUD_REPORT
+  OTHER
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum TicketStatus {
+  NEW
+  IN_PROGRESS
+  WAITING_ON_CUSTOMER
+  RESOLVED
+  CLOSED
+}
+
+model SupportTicket {
+  id              String         @id @default(uuid())
+  userId          String         @map("user_id")
+  assignedToId    String?        @map("assigned_to_id")
+  category        TicketCategory @default(GENERAL)
+  priority        TicketPriority @default(MEDIUM)
+  status          TicketStatus   @default(NEW)
+  subject         String
+  description     String         @db.Text
+  transactionId   String?        @map("transaction_id")
+  propertyId      String?        @map("property_id")
+  slaDeadline     DateTime?      @map("sla_deadline")
+  slaBreached     Boolean        @default(false) @map("sla_breached")
+  firstResponseAt DateTime?      @map("first_response_at")
+  resolvedAt      DateTime?      @map("resolved_at")
+  closedAt        DateTime?      @map("closed_at")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+
+  user       User?              @relation("SupportTicketUser", fields: [userId], references: [id], onDelete: Cascade)
+  assignedTo User?              @relation("SupportTicketAgent", fields: [assignedToId], references: [id], onDelete: SetNull)
+  notes      SupportTicketNote[]
+
+  @@index([userId])
+  @@index([assignedToId])
+  @@index([status])
+  @@index([priority, status])
+  @@index([slaDeadline, slaBreached])
+  @@map("support_tickets")
+}
+
+model SupportTicketNote {
+  id        String   @id @default(uuid())
+  ticketId  String   @map("ticket_id")
+  authorId  String   @map("author_id")
+  content   String   @db.Text
+  isPublic  Boolean  @default(false) @map("is_public")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author User          @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, createdAt])
+  @@map("support_ticket_notes")
+}
+
+// ─── API Request Logs (analytics) ──────────────────────────────────────────
+// Durable store replacing the former in-memory RequestRecord[] in AnalyticsService.
+// Retention: ANALYTICS_RETENTION_DAYS (default 7 days). Cleaned by CleanupService.
+
+model RequestLog {
+  id           String   @id @default(uuid())
+  endpoint     String
+  method       String
+  statusCode   Int      @map("status_code")
+  responseTime Int      @map("response_time") // milliseconds
+  userId       String?  @map("user_id")
+  timestamp    DateTime @default(now())
+
+  @@index([timestamp])
+  @@index([endpoint, timestamp])
+  @@index([userId, timestamp])
+  @@map("request_logs")
+}
+
+// ─── User relation additions ──────────────────────────────────────────────────
+
+// Note: Webhook, TourRequest, AgentAvailability, SupportTicket relations
+// are defined on the User model through @relation directives above.
+// Additional User relations needed:

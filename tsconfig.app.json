@@ -10,7 +10,9 @@
     "strict": false,
     "noImplicitAny": false,
     "exactOptionalPropertyTypes": false,
-    "strictNullChecks": false
+    "strictNullChecks": false,
+    "useUnknownInCatchVariables": false,
+    "noImplicitOverride": false
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "**/*.spec.ts", "**/*.test.ts"]

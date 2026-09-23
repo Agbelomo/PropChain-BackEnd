@@ -3,11 +3,12 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { User as PrismaUser, ApiKey, TokenType } from '@prisma/client';
-import { Prisma } from '@prisma/client';
+import { Prisma, BlacklistedToken, Document, ApiKey, PasswordHistory } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import * as jwt from 'jsonwebtoken';
 import { PrismaService } from '../database/prisma.service';
@@ -31,34 +32,70 @@ import {
   comparePassword,
   createSha256,
   generateBackupCodes,
-  getPasswordHistoryLimit,
   hashPassword,
   parseDuration,
   randomBase32Secret,
   randomToken,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  redactEmail,
   sanitizeUser,
   verifyBackupCode,
   verifyTotpCode,
 } from './security.utils';
+import { validatePassword } from './password.utils';
 import { AuthUserPayload } from './types/auth-user.type';
+import { GoogleProfile } from './strategies/google.strategy';
 
 import { LoginRateLimitService } from './login-rate-limit.service';
-import { UserRole } from '../types/prisma.types';
+import { UserRole, UserTier } from '../types/prisma.types';
+import { FraudService } from '../fraud/fraud.service';
+import { ApiKeyAnalyticsService } from './api-key-analytics.service';
+
+const MIN_JWT_SECRET_LENGTH = 32;
 
 type JwtPayload = {
   sub: string;
   email: string;
   role: UserRole;
+  tier: UserTier;
   type: 'access' | 'refresh';
   jti: string;
-  family?: string; // Token rotation family ID
+  family?: string;
   exp?: number;
 };
+
+type TransactionWithPropertyTitle = Prisma.TransactionGetPayload<{
+  include: { property: { select: { title: true } } };
+}>;
+
+type PropertyWithOwnerName = Prisma.PropertyGetPayload<{
+  include: { owner: { select: { firstName: true; lastName: true } } };
+}>;
+
+interface RecaptchaVerifyResponse {
+  success: boolean;
+  score?: number;
+  action?: string;
+  challenge_ts?: string;
+  hostname?: string;
+  'error-codes'?: string[];
+}
 
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
   private readonly issuer = 'PropChain';
+
+  private readonly registrationIpMap = new Map<string, { email: string; expiresAt: Date }>();
+
+  private hashEmail(email: string): string {
+    const debugPii = this.configService.get<string>('DEBUG_PII') === 'true';
+    if (debugPii) {
+      return email;
+    }
+    return createSha256(email).slice(0, 12);
+  }
+
   private readonly accessTokenTtlSeconds: number;
   private readonly refreshTokenTtlSeconds: number;
   private readonly jwtSecret: string;
@@ -72,10 +109,24 @@ export class AuthService {
     private readonly configService: ConfigService,
     private readonly emailService: EmailService,
     private readonly rateLimitService: LoginRateLimitService,
+    private readonly fraudService: FraudService,
+    @Optional() private readonly apiKeyAnalyticsService?: ApiKeyAnalyticsService,
   ) {
-    this.jwtSecret = this.configService.get<string>('JWT_SECRET') ?? 'propchain-access-secret';
-    this.jwtRefreshSecret =
-      this.configService.get<string>('JWT_REFRESH_SECRET') ?? 'propchain-refresh-secret';
+    const jwtSecret = this.configService.get<string>('JWT_SECRET');
+    if (!jwtSecret || jwtSecret.length < MIN_JWT_SECRET_LENGTH) {
+      throw new Error(
+        `JWT_SECRET must be set and at least ${MIN_JWT_SECRET_LENGTH} characters (256 bits) long`,
+      );
+    }
+    this.jwtSecret = jwtSecret;
+
+    const jwtRefreshSecret = this.configService.get<string>('JWT_REFRESH_SECRET');
+    if (!jwtRefreshSecret || jwtRefreshSecret.length < MIN_JWT_SECRET_LENGTH) {
+      throw new Error(
+        `JWT_REFRESH_SECRET must be set and at least ${MIN_JWT_SECRET_LENGTH} characters (256 bits) long`,
+      );
+    }
+    this.jwtRefreshSecret = jwtRefreshSecret;
     this.accessTokenTtlSeconds = parseDuration(
       this.configService.get<string>('JWT_ACCESS_EXPIRES_IN') ?? '15m',
       15 * 60,
@@ -90,7 +141,10 @@ export class AuthService {
   /**
    * Helper to map transactions to activity items for dashboard
    */
-  private transactionsToActivityItems(transactions: any[], type: 'purchase' | 'sale') {
+  private transactionsToActivityItems(
+    transactions: TransactionWithPropertyTitle[],
+    type: 'purchase' | 'sale',
+  ) {
     return transactions.map((tx) => ({
       type: 'transaction' as const,
       id: tx.id,
@@ -100,13 +154,40 @@ export class AuthService {
     }));
   }
 
-  async register(data: RegisterDto) {
+  async register(data: RegisterDto, ipAddress?: string) {
+    // Block re-registration from same IP until prior email is verified
+    if (ipAddress) {
+      const allowed = this.canRegisterFromIp(ipAddress);
+      if (!allowed) {
+        throw new BadRequestException(
+          'A registration from this IP is already pending email verification. Please verify your email before registering a new account.',
+        );
+      }
+    }
+
     const existingUser = await this.usersService.findByEmail(data.email);
     if (existingUser) {
       throw new BadRequestException('A user with that email already exists');
     }
 
+    const passwordErrors = validatePassword(data.password, this.configService);
+    if (passwordErrors.length > 0) {
+      throw new BadRequestException(
+        `Password does not meet complexity requirements: ${passwordErrors.join('; ')}`,
+      );
+    }
+
     const passwordHash = await hashPassword(data.password, this.bcryptRounds);
+    const verificationToken = randomToken(32);
+    const verificationExpiresAt = new Date(
+      Date.now() +
+        parseDuration(
+          this.configService.get<string>('EMAIL_VERIFICATION_EXPIRES_IN') ?? '24h',
+          24 * 60 * 60,
+        ) *
+          1000,
+    );
+
     const user = await this.prisma.user.create({
       data: {
         email: data.email,
@@ -114,6 +195,8 @@ export class AuthService {
         firstName: data.firstName,
         lastName: data.lastName,
         phone: data.phone,
+        emailVerificationToken: verificationToken,
+        emailVerificationExpires: verificationExpiresAt,
         passwordHistory: {
           create: {
             passwordHash,
@@ -122,14 +205,75 @@ export class AuthService {
       },
     });
 
-    const tokens = await this.issueTokenPair(user);
+    // Send verification email and await result
+    await this.emailService
+      .sendEmail({
+        to: user.email,
+        subject: 'Verify your email - PropChain',
+        template: 'email-verification',
+        context: { token: verificationToken },
+        userId: user.id,
+        emailType: 'email_verification',
+      })
+      .catch((err) => {
+        this.logger.error('Failed to queue verification email:', err?.message || err);
+      });
+
+    // Only issue short-lived verification token after email is sent
+    // Full token pair is issued in verifyInitialEmail after verification succeeds
+
+    // Track IP for re-registration prevention
+    if (ipAddress) {
+      const expiryMs =
+        parseDuration(
+          this.configService.get<string>('EMAIL_VERIFICATION_EXPIRES_IN') ?? '24h',
+          24 * 60 * 60,
+        ) * 1000;
+      this.registrationIpMap.set(ipAddress, {
+        email: user.email,
+        expiresAt: new Date(Date.now() + expiryMs),
+      });
+    }
+
     return {
       user: sanitizeUser(user),
-      ...tokens,
+      message: 'Registration successful. Please check your email to verify your account.',
+      verificationToken,
     };
   }
 
-  async login(data: LoginDto, ipAddress?: string, userAgent?: string) {
+  private canRegisterFromIp(ipAddress: string): boolean {
+    const entry = this.registrationIpMap.get(ipAddress);
+    if (!entry) return true;
+    if (Date.now() > entry.expiresAt.getTime()) {
+      this.registrationIpMap.delete(ipAddress);
+      return true;
+    }
+    return false;
+  }
+
+  private cleanupIpForEmail(email: string): void {
+    for (const [ip, entry] of this.registrationIpMap.entries()) {
+      if (entry.email === email) {
+        this.registrationIpMap.delete(ip);
+        return;
+      }
+    }
+  }
+
+  /**
+   * Performs mandatory security checks before validating credentials.
+   *
+   * Ordering Contract:
+   * 1. Lockout check: Prevent any further action if account is temporarily locked.
+   * 2. CAPTCHA check: If failed attempts exceed threshold, require CAPTCHA to proceed.
+   * 3. Credentials check: (Performed in the main login method after preflight)
+   */
+  private async preflightChecks(
+    data: LoginDto,
+    ipAddress?: string,
+    userAgent?: string,
+  ): Promise<void> {
     // Check if account is locked out
     const isLocked = await this.rateLimitService.isAccountLocked(data.email);
     if (isLocked) {
@@ -152,10 +296,74 @@ export class AuthService {
       }
       const isCaptchaValid = await this.verifyCaptcha(data.captchaToken);
       if (!isCaptchaValid) {
-        // We might also record a failed attempt here if we wanted to
+        await this.rateLimitService.recordFailedAttempt(data.email, ipAddress, userAgent);
         throw new UnauthorizedException('Invalid CAPTCHA');
       }
     }
+  }
+
+  /**
+   * Verify a fetched user's credentials: account state checks (blocked/
+   * deactivated/unverified) and bcrypt password comparison.
+   *
+   * Centralises the post-findByEmail gating plus the bcrypt compare and the
+   * rate-limit / fraud / lockout-email side effects. Extracted from login()
+   * for testability and readability (issue #744).
+   *
+   * @throws UnauthorizedException on any gate failure or password mismatch
+   */
+  private async verifyCredentials(
+    user: {
+      id: string;
+      email: string;
+      password: string | null;
+      isBlocked: boolean;
+      isDeactivated: boolean;
+      isVerified: boolean;
+    },
+    password: string,
+    ipAddress?: string,
+    userAgent?: string,
+  ): Promise<void> {
+    if (user.isBlocked) {
+      throw new UnauthorizedException('Your account has been blocked. Please contact support.');
+    }
+    if (user.isDeactivated) {
+      throw new UnauthorizedException(
+        'Your account has been deactivated. Please contact support to reactivate your account.',
+      );
+    }
+    if (!user.isVerified) {
+      throw new UnauthorizedException('Please verify your email before logging in.');
+    }
+
+    const passwordMatches = await comparePassword(password, user.password ?? '');
+    if (!passwordMatches) {
+      const shouldLock = await this.rateLimitService.recordFailedAttempt(
+        user.email,
+        ipAddress,
+        userAgent,
+      );
+      await this.fraudService.evaluateFailedLogin(user.email, ipAddress, userAgent);
+
+      if (shouldLock) {
+        const lockoutDuration = 30;
+        await this.emailService.sendAccountLockedEmail(user.email, lockoutDuration).catch((err) => {
+          this.logger.error(
+            `Failed to send account locked email to user ${user.id} (${this.hashEmail(user.email)}): ${err.message}`,
+          );
+        });
+        throw new UnauthorizedException(
+          `Account locked due to too many failed login attempts. Please try again in ${lockoutDuration} minutes.`,
+        );
+      }
+
+      throw new UnauthorizedException('Invalid credentials');
+    }
+  }
+
+  async login(data: LoginDto, ipAddress?: string, userAgent?: string) {
+    await this.preflightChecks(data, ipAddress, userAgent);
 
     const user = await this.usersService.findByEmail(data.email);
     if (!user) {
@@ -164,38 +372,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    if (user.isBlocked) {
-      throw new UnauthorizedException('Your account has been blocked. Please contact support.');
-    }
-
-    if (user.isDeactivated) {
-      throw new UnauthorizedException(
-        'Your account has been deactivated. Please contact support to reactivate your account.',
-      );
-    }
-
-    const passwordMatches = await comparePassword(data.password, user.password);
-    if (!passwordMatches) {
-      // Record failed login attempt
-      const shouldLock = await this.rateLimitService.recordFailedAttempt(
-        data.email,
-        ipAddress,
-        userAgent,
-      );
-
-      if (shouldLock) {
-        const lockoutDuration = 30;
-        await this.emailService.sendAccountLockedEmail(user.email, lockoutDuration).catch((err) => {
-          this.logger.error(`Failed to send account locked email to ${user.email}: ${err.message}`);
-        });
-
-        throw new UnauthorizedException(
-          `Account locked due to too many failed login attempts. Please try again in ${lockoutDuration} minutes.`,
-        );
-      }
-
-      throw new UnauthorizedException('Invalid credentials');
-    }
+    await this.verifyCredentials(user, data.password, ipAddress, userAgent);
 
     if (user.twoFactorEnabled) {
       const hasTotpCode = Boolean(data.totpCode?.trim());
@@ -206,16 +383,26 @@ export class AuthService {
       }
 
       if (hasTotpCode && user.twoFactorSecret) {
+        const totpCode = data.totpCode;
+        if (!totpCode) {
+          throw new UnauthorizedException('Two-factor authentication code required');
+        }
+
         const validCode = verifyTotpCode({
           secret: user.twoFactorSecret,
-          code: data.totpCode!,
+          code: totpCode,
         });
 
         if (!validCode) {
           throw new UnauthorizedException('Invalid two-factor authentication code');
         }
       } else if (hasBackupCode) {
-        const matchingBackupCode = verifyBackupCode(data.backupCode!, user.twoFactorBackupCodes);
+        const backupCode = data.backupCode;
+        if (!backupCode) {
+          throw new UnauthorizedException('Two-factor authentication code required');
+        }
+
+        const matchingBackupCode = verifyBackupCode(backupCode, user.twoFactorBackupCodes);
         if (!matchingBackupCode) {
           throw new UnauthorizedException('Invalid backup code');
         }
@@ -234,10 +421,37 @@ export class AuthService {
     // Record successful login
     await this.rateLimitService.recordSuccessfulAttempt(data.email, ipAddress, userAgent);
     await this.recordLoginHistory(user.id, ipAddress, userAgent);
+    await this.fraudService.evaluateSuccessfulLogin(user.id, ipAddress, userAgent);
+    // Issue #961 — geo + device fingerprint fed into the post-login fraud
+    // evaluation pipeline (velocity / impossible travel / device mismatch).
+    // FraudService resolves both fields from its own injected helpers.
+    try {
+      await this.fraudService.recordLoginContext(user.id, {
+        ipAddress,
+        userAgent,
+      });
+    } catch (contextError) {
+      // Auth.path has @ts-nocheck; swallow context-resolution errors so a
+      // bad IP header never blocks a successful authentication.
+    }
 
-    const tokens = await this.issueTokenPair(user);
+    const refreshedUser = await this.prisma.user.findUnique({
+      where: { id: user.id },
+    });
+
+    if (!refreshedUser) {
+      throw new UnauthorizedException('User no longer exists');
+    }
+
+    if (refreshedUser.isBlocked) {
+      throw new UnauthorizedException(
+        'Your account has been blocked after a fraud review. Please contact support.',
+      );
+    }
+
+    const tokens = await this.issueTokenPair(refreshedUser, undefined, ipAddress, userAgent);
     return {
-      user: sanitizeUser(user),
+      user: sanitizeUser(refreshedUser),
       ...tokens,
     };
   }
@@ -258,6 +472,7 @@ export class AuthService {
       // TOKEN REUSE DETECTED! This is a potential attack
       // Mark the reuse and invalidate the entire token family
       await this.handleTokenReuse(blacklistedToken, payload.jti, ipAddress, userAgent);
+      await this.fraudService.handleTokenReuse(payload.sub, payload.jti, ipAddress, userAgent);
 
       this.logger.error(
         `Refresh token reuse detected for user ${payload.sub} (JTI: ${payload.jti}, Family: ${payload.family}). IP: ${ipAddress}`,
@@ -295,10 +510,10 @@ export class AuthService {
     });
 
     // Issue new token pair with SAME family ID
-    const tokens = await this.issueTokenPair(user, payload.family);
+    const tokens = await this.issueTokenPair(user, payload.family, ipAddress, userAgent);
 
     this.logger.log(
-      `Token rotated for user ${user.id} (${user.email}). Family: ${payload.family}. IP: ${ipAddress}`,
+      `Token rotated for user ${user.id} (${this.hashEmail(user.email)}). Family: ${payload.family}. IP: ${ipAddress}`,
     );
 
     return {
@@ -311,7 +526,7 @@ export class AuthService {
    * Handle token reuse detection - invalidate entire token family
    */
   private async handleTokenReuse(
-    blacklistedToken: any,
+    blacklistedToken: BlacklistedToken,
     reusedJti: string,
     ipAddress?: string,
     userAgent?: string,
@@ -361,9 +576,11 @@ export class AuthService {
           userId: user.sub,
           tokenFamily: accessPayload.family,
         });
-      } catch (error) {
+      } catch (error: unknown) {
         // Token might already be expired or invalid, continue with logout
-        this.logger.warn(`Failed to blacklist access token for user ${user.sub}: ${error.message}`);
+        this.logger.warn(
+          `Failed to blacklist access token for user ${user.sub}: ${(error as Error).message}`,
+        );
       }
     }
 
@@ -382,20 +599,20 @@ export class AuthService {
           userId: user.sub,
           tokenFamily: refreshPayload.family,
         });
-      } catch (error) {
+      } catch (error: unknown) {
         if (error instanceof UnauthorizedException) {
           throw error;
         }
         // Token might already be expired or invalid, continue with logout
         this.logger.warn(
-          `Failed to blacklist refresh token for user ${user.sub}: ${error.message}`,
+          `Failed to blacklist refresh token for user ${user.sub}: ${(error as Error).message}`,
         );
       }
     }
 
     // Log the logout event
     this.logger.log(
-      `User ${user.sub} (${user.email}) logged out successfully at ${logoutTime.toISOString()}`,
+      `User ${user.sub} (${this.hashEmail(user.email)}) logged out successfully at ${logoutTime.toISOString()}`,
     );
 
     return {
@@ -426,10 +643,14 @@ export class AuthService {
           expiresAt: new Date((accessPayload.exp ?? 0) * 1000),
           userId: user.sub,
         });
-      } catch (error) {
-        this.logger.warn(`Failed to blacklist access token for user ${user.sub}: ${error.message}`);
+      } catch (error: unknown) {
+        this.logger.warn(
+          `Failed to blacklist access token for user ${user.sub}: ${(error as Error).message}`,
+        );
       }
     }
+
+    await this.sessionsService.revokeAllSessions(user.sub);
 
     // Find all blacklisted refresh tokens for this user that are still active
     const blacklistedRefreshTokens = await this.prisma.blacklistedToken.findMany({
@@ -443,7 +664,7 @@ export class AuthService {
     });
 
     this.logger.log(
-      `User ${user.sub} (${user.email}) logged out from all devices at ${logoutTime.toISOString()}. Total active blacklisted refresh tokens: ${blacklistedRefreshTokens.length}`,
+      `User ${user.sub} (${this.hashEmail(user.email)}) logged out from all devices at ${logoutTime.toISOString()}. Total active blacklisted refresh tokens: ${blacklistedRefreshTokens.length}`,
     );
 
     return {
@@ -470,8 +691,6 @@ export class AuthService {
     return sanitizeUser(foundUser);
   }
 
-  // Only one implementation should exist; duplicate removed.
-
   async getDashboard(user: AuthUserPayload) {
     const foundUser = await this.prisma.user.findUnique({
       where: { id: user.sub },
@@ -481,6 +700,7 @@ export class AuthService {
       throw new NotFoundException('User not found');
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const [properties, buyerTransactions, sellerTransactions, documents, apiKeys] =
       await Promise.all([
         this.prisma.property.findMany({
@@ -587,7 +807,7 @@ export class AuthService {
     const recentActivity = [
       ...this.transactionsToActivityItems(buyerTransactions, 'purchase'),
       ...this.transactionsToActivityItems(sellerTransactions, 'sale'),
-      ...documents.map((doc: any) => ({
+      ...documents.map((doc: Document) => ({
         type: 'document' as const,
         id: doc.id,
         title: doc.fileName,
@@ -611,7 +831,7 @@ export class AuthService {
         apiKeysCount: apiKeys.length,
       },
       recentActivity,
-      recommendations: recommendationProperties.map((p: any) => ({
+      recommendations: recommendationProperties.map((p: PropertyWithOwnerName) => ({
         id: p.id,
         title: p.title,
         address: p.address,
@@ -630,7 +850,7 @@ export class AuthService {
   }
 
   async changePassword(user: AuthUserPayload, data: ChangePasswordDto) {
-    const passwordHistoryLimit = getPasswordHistoryLimit();
+    const passwordHistoryLimit = this.getPasswordHistoryLimit();
     const existingUser = await this.prisma.user.findUnique({
       where: { id: user.sub },
       include: {
@@ -646,10 +866,17 @@ export class AuthService {
 
     const currentPasswordMatches = await comparePassword(
       data.currentPassword,
-      existingUser.password,
+      existingUser.password ?? '',
     );
     if (!currentPasswordMatches) {
       throw new UnauthorizedException('Current password is incorrect');
+    }
+
+    const passwordErrors = validatePassword(data.newPassword, this.configService);
+    if (passwordErrors.length > 0) {
+      throw new BadRequestException(
+        `Password does not meet complexity requirements: ${passwordErrors.join('; ')}`,
+      );
     }
 
     const passwordReused = await Promise.all(
@@ -699,6 +926,23 @@ export class AuthService {
         });
       }
     });
+
+    // Audit log password change (#886)
+    await this.prisma.activityLog
+      .create({
+        data: {
+          userId: user.sub,
+          action: 'PASSWORD_CHANGED',
+          entityType: 'USER',
+          entityId: user.sub,
+          description: 'User changed their password',
+        },
+      })
+      .catch((err) => {
+        this.logger.error(`Failed to audit-log password change: ${err}`);
+      });
+
+    await this.sessionsService.revokeAllSessions(existingUser.id);
 
     return { message: 'Password updated successfully' };
   }
@@ -760,6 +1004,21 @@ export class AuthService {
       },
     });
 
+    // Audit log 2FA enable (#886)
+    await this.prisma.activityLog
+      .create({
+        data: {
+          userId: user.sub,
+          action: 'TWO_FACTOR_ENABLED',
+          entityType: 'USER',
+          entityId: user.sub,
+          description: 'User enabled two-factor authentication',
+        },
+      })
+      .catch((err) => {
+        this.logger.error(`Failed to audit-log 2FA enable: ${err}`);
+      });
+
     return { message: 'Two-factor authentication enabled successfully' };
   }
 
@@ -772,7 +1031,7 @@ export class AuthService {
       throw new NotFoundException('User not found');
     }
 
-    const passwordMatches = await comparePassword(password, foundUser.password);
+    const passwordMatches = await comparePassword(password, foundUser.password ?? '');
     if (!passwordMatches) {
       throw new UnauthorizedException('Password is incorrect');
     }
@@ -788,6 +1047,21 @@ export class AuthService {
       },
     });
 
+    // Audit log 2FA disable (#886)
+    await this.prisma.activityLog
+      .create({
+        data: {
+          userId: user.sub,
+          action: 'TWO_FACTOR_DISABLED',
+          entityType: 'USER',
+          entityId: user.sub,
+          description: 'User disabled two-factor authentication',
+        },
+      })
+      .catch((err) => {
+        this.logger.error(`Failed to audit-log 2FA disable: ${err}`);
+      });
+
     return { message: 'Two-factor authentication disabled successfully' };
   }
 
@@ -801,6 +1075,7 @@ export class AuthService {
         keyPrefix: apiKeyValue.slice(0, 12),
         keyHash: createSha256(apiKeyValue),
         permissions,
+        monthlyQuota: data.monthlyQuota ?? null,
         expiresAt: data.expiresAt ? new Date(data.expiresAt) : null,
       },
     });
@@ -817,7 +1092,7 @@ export class AuthService {
       orderBy: { createdAt: 'desc' },
     });
 
-    return apiKeys.map((apiKey: any) => this.toApiKeyResponse(apiKey));
+    return apiKeys.map((apiKey: ApiKey) => this.toApiKeyResponse(apiKey));
   }
 
   async rotateApiKey(user: AuthUserPayload, apiKeyId: string) {
@@ -866,6 +1141,51 @@ export class AuthService {
     });
 
     return { message: 'API key revoked successfully' };
+  }
+
+  async googleOAuthLogin(profile: GoogleProfile) {
+    let user = await this.prisma.user.findUnique({ where: { googleId: profile.googleId } });
+
+    if (!user) {
+      // Try to link to an existing account by email
+      user = await this.prisma.user.findUnique({ where: { email: profile.email } });
+
+      if (user) {
+        // Link Google account to existing user
+        user = await this.prisma.user.update({
+          where: { id: user.id },
+          data: {
+            googleId: profile.googleId,
+            avatar: user.avatar ?? profile.avatar,
+          },
+        });
+      } else {
+        // Create new user from Google profile
+        user = await this.prisma.user.create({
+          data: {
+            email: profile.email,
+            googleId: profile.googleId,
+            firstName: profile.firstName,
+            lastName: profile.lastName,
+            avatar: profile.avatar,
+            isVerified: true,
+          },
+        });
+      }
+    } else {
+      // Sync profile fields
+      user = await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          firstName: profile.firstName,
+          lastName: profile.lastName,
+          avatar: user.avatar ?? profile.avatar,
+        },
+      });
+    }
+
+    const tokens = await this.issueTokenPair(user);
+    return { user: sanitizeUser(user), ...tokens };
   }
 
   async updateApiKeyPermissions(
@@ -932,6 +1252,7 @@ export class AuthService {
       select: {
         email: true,
         role: true,
+        tier: true,
         lastActivityAt: true,
       },
     });
@@ -947,13 +1268,20 @@ export class AuthService {
           where: { id: payload.sub },
           data: { lastActivityAt: now },
         })
-        .catch((err) => this.logger.error(`Failed to update lastActivityAt: ${err.message}`));
+        .catch((err: unknown) =>
+          this.logger.error(
+            `Failed to update lastActivityAt: ${
+              err instanceof Error ? err.message : JSON.stringify(err)
+            }`,
+          ),
+        );
     }
 
     return {
       sub: payload.sub,
       email: user.email,
       role: user.role,
+      tier: user.tier,
       type: 'access',
       jti: payload.jti,
     };
@@ -977,6 +1305,8 @@ export class AuthService {
       throw new UnauthorizedException('User account is blocked');
     }
 
+    await this.apiKeyAnalyticsService?.checkQuota(apiKey.id);
+
     await this.prisma.apiKey.update({
       where: { id: apiKey.id },
       data: {
@@ -987,18 +1317,23 @@ export class AuthService {
       },
     });
 
+    await this.apiKeyAnalyticsService?.recordUsage(apiKey.id).catch((err: unknown) => {
+      this.logger.error(`Failed to record API key usage: ${(err as Error).message}`);
+    });
+
     return {
       sub: apiKey.userId,
       email: apiKey.user.email,
       role: apiKey.user.role as UserRole,
+      tier: apiKey.user.tier as UserTier,
       type: 'api-key',
       apiKeyId: apiKey.id,
       apiKeyPermissions: apiKey.permissions,
     };
   }
 
-  private async issueTokenPair(
-    user: PrismaUser,
+  async issueTokenPair(
+    user: { id: string; email: string; role: string; tier: string },
     tokenFamily?: string,
     ipAddress?: string,
     userAgent?: string,
@@ -1012,6 +1347,7 @@ export class AuthService {
         sub: user.id,
         email: user.email,
         role: user.role as UserRole,
+        tier: user.tier as UserTier,
         type: 'access',
         jti: accessJti,
         family: family,
@@ -1025,6 +1361,7 @@ export class AuthService {
         sub: user.id,
         email: user.email,
         role: user.role as UserRole,
+        tier: user.tier as UserTier,
         type: 'refresh',
         jti: refreshJti,
         family: family,
@@ -1112,17 +1449,27 @@ export class AuthService {
     });
   }
 
+  /**
+   * Generate an API key value in the format `pc_<48-hex-chars>`.
+   *
+   * - Prefix `pc_` identifies PropChain-issued keys (51 chars total).
+   * - The 24-byte random payload provides 192 bits of entropy via
+   *   `crypto.randomBytes` (hex-encoded, 48 characters).
+   * - Keys are stored hashed (SHA-256) in the database; the raw value
+   *   is shown to the user only once at creation time.
+   */
   private generateApiKeyValue() {
     return `pc_${randomToken(24)}`;
   }
 
-  private toApiKeyResponse(apiKey: any) {
+  private toApiKeyResponse(apiKey: ApiKey) {
     return {
       id: apiKey.id,
       name: apiKey.name,
       keyPrefix: apiKey.keyPrefix,
       permissions: apiKey.permissions,
       usageCount: apiKey.usageCount,
+      monthlyQuota: apiKey.monthlyQuota,
       lastUsedAt: apiKey.lastUsedAt,
       expiresAt: apiKey.expiresAt,
       revokedAt: apiKey.revokedAt,
@@ -1165,23 +1512,25 @@ export class AuthService {
 
     // Generate new reset token
     const resetToken = randomToken(32);
+    const tokenHash = createSha256(resetToken);
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
 
     await this.prisma.passwordResetToken.create({
       data: {
         userId: user.id,
-        token: resetToken,
+        token: tokenHash,
         expiresAt,
       },
     });
 
-    // Send reset email
+    // Send reset email with raw token (not the hash)
     await this.emailService.sendPasswordResetEmail(user.email, resetToken);
   }
 
   async resetPassword(data: ResetPasswordDto): Promise<void> {
+    const tokenHash = createSha256(data.token);
     const resetToken = await this.prisma.passwordResetToken.findUnique({
-      where: { token: data.token },
+      where: { token: tokenHash },
       include: { user: true },
     });
 
@@ -1201,7 +1550,14 @@ export class AuthService {
       throw new BadRequestException('Account is blocked');
     }
 
-    const passwordHistoryLimit = getPasswordHistoryLimit();
+    const passwordHistoryLimit = this.getPasswordHistoryLimit();
+
+    const passwordErrors = validatePassword(data.newPassword, this.configService);
+    if (passwordErrors.length > 0) {
+      throw new BadRequestException(
+        `Password does not meet complexity requirements: ${passwordErrors.join('; ')}`,
+      );
+    }
 
     // Check if new password was used recently
     const recentPasswords = await this.prisma.passwordHistory.findMany({
@@ -1210,13 +1566,13 @@ export class AuthService {
       take: passwordHistoryLimit,
     });
 
-    for (const historyEntry of recentPasswords) {
-      const isReused = await comparePassword(data.newPassword, historyEntry.passwordHash);
-      if (isReused) {
-        throw new BadRequestException(
-          `Password reuse is not allowed for the last ${passwordHistoryLimit} passwords`,
-        );
-      }
+    const reuseResults = await Promise.all(
+      recentPasswords.map((entry) => comparePassword(data.newPassword, entry.passwordHash)),
+    );
+    if (reuseResults.some(Boolean)) {
+      throw new BadRequestException(
+        `Password reuse is not allowed for the last ${passwordHistoryLimit} passwords`,
+      );
     }
 
     const newPasswordHash = await hashPassword(data.newPassword, this.bcryptRounds);
@@ -1250,11 +1606,13 @@ export class AuthService {
       if (historyEntries.length > 0) {
         await tx.passwordHistory.deleteMany({
           where: {
-            id: { in: historyEntries.map((entry: any) => entry.id) },
+            id: { in: historyEntries.map((entry: PasswordHistory) => entry.id) },
           },
         });
       }
     });
+
+    await this.sessionsService.revokeAllSessions(resetToken.userId);
   }
 
   async unlockAccount(email: string) {
@@ -1294,11 +1652,30 @@ export class AuthService {
     });
   }
 
+  private getPasswordHistoryLimit(): number {
+    const parsed = Number(this.configService.get('PASSWORD_HISTORY_LIMIT') ?? 5);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 5;
+  }
+
   private async verifyCaptcha(token: string): Promise<boolean> {
     const secret = this.configService.get<string>('RECAPTCHA_SECRET');
+    const bypass = this.configService.get<string>('CAPTCHA_BYPASS') === 'true';
+
+    if (bypass) {
+      this.logger.warn(
+        'CAPTCHA bypass is enabled via CAPTCHA_BYPASS=true. This should only be used in development.',
+      );
+      return true;
+    }
+
     if (!secret) {
-      this.logger.warn('RECAPTCHA_SECRET is not configured, skipping CAPTCHA verification');
-      return true; // Bypass if not configured in dev
+      // Defensive: boot-time validation catches this in validateEnvironment().
+      // At request time we must never surface a bare 500 for a configuration
+      // problem – return a stable 503 instead.
+      throw new ServiceUnavailableException(
+        'CAPTCHA verification is temporarily unavailable.',
+        'CAPTCHA_SERVICE_UNAVAILABLE',
+      );
     }
 
     try {
@@ -1310,7 +1687,7 @@ export class AuthService {
         body: `secret=${secret}&response=${token}`,
       });
 
-      const data = (await response.json()) as any;
+      const data = (await response.json()) as RecaptchaVerifyResponse;
 
       // reCAPTCHA v3 returns a score between 0.0 and 1.0. Typically, 0.5 is a good threshold.
       if (data.success && data.score !== undefined && data.score >= 0.5) {
@@ -1324,9 +1701,108 @@ export class AuthService {
 
       this.logger.warn(`CAPTCHA verification failed: ${JSON.stringify(data['error-codes'])}`);
       return false;
-    } catch (error) {
-      this.logger.error(`Error verifying CAPTCHA: ${error.message}`);
+    } catch (error: unknown) {
+      this.logger.error(`Error verifying CAPTCHA: ${(error as Error).message}`);
       return false;
     }
+  }
+
+  async verifyInitialEmail(token: string, ipAddress?: string, userAgent?: string) {
+    // Find user by verification token
+    const user = await this.prisma.user.findFirst({
+      where: {
+        emailVerificationToken: token,
+      },
+    });
+
+    if (!user) {
+      throw new BadRequestException('Invalid or expired verification token');
+    }
+
+    // Check if token is expired
+    if (!user.emailVerificationExpires || new Date() > user.emailVerificationExpires) {
+      // Clear expired token
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          emailVerificationToken: null,
+          emailVerificationExpires: null,
+        },
+      });
+      throw new BadRequestException('Verification token has expired');
+    }
+
+    // Verify user not already verified
+    if (user.isVerified) {
+      throw new BadRequestException('Email already verified');
+    }
+
+    // Update user to isVerified and clear verification fields
+    const updatedUser = await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        isVerified: true,
+        emailVerificationToken: null,
+        emailVerificationExpires: null,
+      },
+    });
+
+    // Issue token pair
+    const tokens = await this.issueTokenPair(updatedUser, undefined, ipAddress, userAgent);
+
+    return {
+      message: 'Email verified successfully',
+      user: sanitizeUser(updatedUser),
+      ...tokens,
+    };
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async resendEmailVerification(email: string, ipAddress?: string, userAgent?: string) {
+    const user = await this.usersService.findByEmail(email);
+    if (!user) {
+      return;
+    }
+
+    if (user.isBlocked) {
+      return;
+    }
+
+    if (user.isVerified) {
+      throw new BadRequestException('Email already verified');
+    }
+
+    const verificationToken = randomToken(32);
+    const verificationExpiresAt = new Date(
+      Date.now() +
+        parseDuration(
+          this.configService.get<string>('EMAIL_VERIFICATION_EXPIRES_IN') ?? '24h',
+          24 * 60 * 60,
+        ) *
+          1000,
+    );
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        emailVerificationToken: verificationToken,
+        emailVerificationExpires: verificationExpiresAt,
+      },
+    });
+
+    await this.emailService
+      .sendEmail({
+        to: user.email,
+        subject: 'Verify your email - PropChain',
+        template: 'email-verification',
+        context: { token: verificationToken },
+        userId: user.id,
+        emailType: 'email_verification',
+      })
+      .catch((err) => {
+        this.logger.error('Failed to queue verification email:', err?.message || err);
+      });
+
+    this.logger.log(`Verification email resent for user ${user.id}`);
   }
 }

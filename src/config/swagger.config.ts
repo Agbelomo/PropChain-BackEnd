@@ -3,8 +3,14 @@
  * Sets up comprehensive API documentation with Swagger UI
  */
 
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import { INestApplication } from '@nestjs/common';
+import { DocumentBuilder, SwaggerModule, OpenAPIObject } from '@nestjs/swagger';
+import { INestApplication, Logger } from '@nestjs/common';
+
+const logger = new Logger('SwaggerConfig');
+
+interface AppWithOpenApiDoc {
+  openAPIDocument?: OpenAPIObject;
+}
 
 export function setupSwagger(app: INestApplication): void {
   const config = new DocumentBuilder()
@@ -25,9 +31,19 @@ export function setupSwagger(app: INestApplication): void {
         type: 'apiKey',
         name: 'api-key',
         in: 'header',
-        description: 'API Key for server-to-server authentication',
+        description:
+          'API Key for server-to-server authentication. The legacy `x-api-key` header is also accepted.',
       },
       'api-key',
+    )
+    .addApiKey(
+      {
+        type: 'apiKey',
+        name: 'x-api-key',
+        in: 'header',
+        description: 'Legacy alias for the `api-key` header (accepted for compatibility).',
+      },
+      'x-api-key',
     )
     .addApiKey(
       {
@@ -48,6 +64,18 @@ export function setupSwagger(app: INestApplication): void {
     .addTag('Trust Score', 'Trust score calculation and management')
     .addTag('Email', 'Email verification endpoints')
     .addTag('Versioning', 'API versioning information')
+    .addTag('Admin', 'Administrative endpoints — admin role only (role-restricted)')
+    .addTag(
+      'Fraud',
+      'Fraud detection and investigation endpoints — admin role only (role-restricted). ' +
+        'Currently routed through the Admin module; a future change may extract these into a dedicated controller.',
+    )
+    .addTag('Transactions', 'Transaction management endpoints')
+    .addTag('Blockchain', 'Blockchain integration endpoints')
+    .addTag('Search', 'Property search endpoints')
+    .addTag('Documents', 'Document management endpoints')
+    .addTag('Notifications', 'Notification endpoints')
+    .addTag('Analytics', 'Analytics and reporting endpoints')
     .build();
 
   const document = SwaggerModule.createDocument(app, config);
@@ -105,7 +133,7 @@ export function setupSwagger(app: INestApplication): void {
     ],
   });
 
-  console.log('✅ Swagger UI available at http://localhost:3000/api/docs');
+  logger.log('Swagger UI available at http://localhost:3000/api/docs');
 }
 
 /**
@@ -129,5 +157,5 @@ export function setupOpenAPIEndpoint(app: INestApplication): void {
   const document = SwaggerModule.createDocument(app, config);
 
   // Store document in app for access via endpoint
-  (app as any).openAPIDocument = document;
+  (app as unknown as AppWithOpenApiDoc).openAPIDocument = document;
 }

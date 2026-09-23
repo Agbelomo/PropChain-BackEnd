@@ -1,3 +1,4 @@
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { IsEnum, IsOptional, IsString, IsUUID } from 'class-validator';
 import { VerificationStatus } from '@prisma/client';
 

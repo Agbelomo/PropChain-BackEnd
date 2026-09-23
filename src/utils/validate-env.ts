@@ -1,0 +1,76 @@
+import { Logger } from '@nestjs/common';
+import Web3 from 'web3';
+
+const logger = new Logger('EnvValidation');
+
+const REQUIRED_ENV_VARS = ['DATABASE_URL', 'JWT_SECRET', 'JWT_REFRESH_SECRET'] as const;
+const JWT_SECRET_VARS = ['JWT_SECRET', 'JWT_REFRESH_SECRET'] as const;
+const MIN_JWT_SECRET_LENGTH = 32;
+
+/**
+ * Whether CAPTCHA verification is required at runtime (#1194).
+ *
+ * CAPTCHA is required by default (docs recommend keeping it on in production)
+ * and is only disabled when CAPTCHA_BYPASS=true is explicitly set for
+ * development. When required, a missing RECAPTCHA_SECRET is a fatal
+ * configuration error that must abort boot instead of surfacing as an opaque
+ * 500 during login.
+ */
+export function isCaptchaRequired(): boolean {
+  return process.env.CAPTCHA_BYPASS !== 'true';
+}
+
+export function validateEnvironment(): void {
+  const MISSING: string[] = [];
+  const WEAK: string[] = [];
+
+  for (const key of REQUIRED_ENV_VARS) {
+    if (!process.env[key]) {
+      MISSING.push(key);
+    }
+  }
+
+  // #1194 – fail fast at boot when CAPTCHA is required but the secret is
+  // absent. This prevents the request-time 500 caused by a missing secret.
+  if (isCaptchaRequired() && !process.env.RECAPTCHA_SECRET) {
+    MISSING.push(
+      'RECAPTCHA_SECRET (required because CAPTCHA_BYPASS != true; ' +
+        'set CAPTCHA_BYPASS=true for development environments without reCAPTCHA)',
+    );
+  }
+
+  for (const key of JWT_SECRET_VARS) {
+    const value = process.env[key];
+    if (value && value.length < MIN_JWT_SECRET_LENGTH) {
+      WEAK.push(`${key} (found ${value.length} chars, need at least ${MIN_JWT_SECRET_LENGTH})`);
+    }
+  }
+
+  const blockchainErrors = validateBlockchainEnvironment();
+
+  if (MISSING.length > 0 || WEAK.length > 0 || blockchainErrors.length > 0) {
+    const sections: string[] = [];
+    if (MISSING.length > 0) {
+      sections.push(
+        `Missing required environment variables:\n` + MISSING.map((k) => `    - ${k}`).join('\n'),
+      );
+    }
+    if (WEAK.length > 0) {
+      sections.push(
+        `Environment variables below the minimum required length (256 bits / ${MIN_JWT_SECRET_LENGTH} chars):\n` +
+          WEAK.map((k) => `    - ${k}`).join('\n'),
+      );
+    }
+    if (blockchainErrors.length > 0) {
+      sections.push(
+        `Blockchain configuration errors:\n` + blockchainErrors.map((k) => `    - ${k}`).join('\n'),
+      );
+    }
+    logger.error(
+      `\n  Fatal:\n  ` +
+        sections.join('\n\n  ') +
+        `\n\n  Please set them in .env or .env.local before starting the application.\n`,
+    );
+    process.exit(1);
+  }
+}

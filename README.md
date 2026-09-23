@@ -1,12 +1,13 @@
 # PropChain - Blockchain-Powered Real Estate Platform
 
-A modern, scalable backend API for real estate transactions built with NestJS and PostgreSQL.
+A modern, scalable backend API for real estate transactions built with NestJS and PostgreSQL
 
 ## 🚀 Features
 
 - **User Management** - Registration, authentication, and profile management
 - **Property Listings** - Create, manage, and search property listings
 - **Transaction Tracking** - Record and track real estate transactions
+- **Tax Strategy Suggestions** - Store informational, non-binding tax structuring suggestions for transactions
 - **Document Management** - Store and manage property-related documents
 - **Role-Based Access Control** - USER, AGENT, ADMIN roles with route protection
 - **Clean Architecture** - Modular, testable, and maintainable code structure
@@ -94,23 +95,87 @@ cp .env.example .env
 # Set up your database URL in .env file
 ```
 
+## 🐳 Docker Workflow (#1175)
+
+A production `Dockerfile` is included and `docker-compose.yml` wires up the
+full stack (`app`, `postgres`, `pgbouncer`, `redis`).
+
+```bash
+# Build and boot the full stack
+docker compose up --build
+
+# Verify container health (GET /healthz returns 200)
+curl -fsSL http://localhost:3000/healthz
+
+# Tear down (including volumes)
+docker compose down -v
+```
+
+- The `app` container applies pending Prisma migrations (`prisma migrate deploy`)
+  via `docker-entrypoint.sh` before starting `node dist/main`.
+- Health checks: `postgres`/`pgbouncer`/`redis` use their native probes; the
+  `app` service probes `GET /healthz`.
+- Override secrets via `.env` variables: `POSTGRES_PASSWORD`, `JWT_SECRET`,
+  `JWT_REFRESH_SECRET`, `REDIS_PASSWORD`. The JWT secrets must each be at
+  least 32 characters or the app will refuse to boot.
+
 ## ⚙️ Configuration
 
 The application uses environment variables for configuration. Copy `.env.example` to `.env` and adjust the values as needed.
 
 ### Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DATABASE_URL` | PostgreSQL connection string | Required |
-| `PORT` | Server port | 3000 |
-| `NODE_ENV` | Environment mode | development |
-| `JWT_SECRET` | JWT signing secret | Required |
-| `JWT_REFRESH_SECRET` | JWT refresh token secret | Required |
-| `JWT_ACCESS_EXPIRES_IN` | Access token expiration | 15m |
-| `JWT_REFRESH_EXPIRES_IN` | Refresh token expiration | 7d |
-| `BCRYPT_ROUNDS` | Password hashing rounds | 12 |
-| `PASSWORD_HISTORY_LIMIT` | Password history limit | 5 |
+| Variable                          | Description                              | Default                             |
+| :-------------------------------- | :--------------------------------------- | :---------------------------------- |
+| `DATABASE_URL`                    | PostgreSQL connection string             | Required                            |
+| `PORT`                            | Server port                              | 3000                                |
+| `NODE_ENV`                        | Environment mode                         | development                         |
+| `FRONTEND_URL`                    | Frontend application URL for email links | http://localhost:3000               |
+| `JWT_SECRET`                      | JWT signing secret                       | Required                            |
+| `JWT_REFRESH_SECRET`              | JWT refresh token secret                 | Required                            |
+| `JWT_ACCESS_EXPIRES_IN`           | Access token expiration                  | 15m                                 |
+| `JWT_REFRESH_EXPIRES_IN`          | Refresh token expiration                 | 7d                                  |
+| `BCRYPT_ROUNDS`                   | Password hashing rounds                  | 12                                  |
+| `PASSWORD_HISTORY_LIMIT`          | Password history limit                   | 5                                   |
+| `PASSWORD_MIN_LENGTH`             | Minimum password length                  | 8                                   |
+| `PASSWORD_REQUIRE_UPPERCASE`      | Require uppercase in password            | true                                |
+| `PASSWORD_REQUIRE_LOWERCASE`      | Require lowercase in password            | true                                |
+| `PASSWORD_REQUIRE_DIGIT`          | Require digit in password                | true                                |
+| `PASSWORD_REQUIRE_SPECIAL`        | Require special char in password         | true                                |
+| `PASSWORD_SPECIAL_CHARS`          | Allowed special characters               | !@#$%^&*()_+-=...                   |
+| `FRONTEND_URL`                    | Frontend application URL for email links | http://localhost:3000               |
+| `RECAPTCHA_SECRET`                | Google reCAPTCHA v3 private key          | Required                            |
+| `CAPTCHA_THRESHOLD`               | Minimum reCAPTCHA score to pass          | 0.5                                 |
+| `BASE_URL`                        | Root URL of this API server              | http://localhost:3000               |
+| `API_URL`                         | Full API base URL for email links        | http://localhost:3000/api           |
+| `AVATAR_UPLOAD_DIR`               | Directory for user avatar uploads        | ./uploads/avatars                   |
+| `AVATAR_MAX_FILE_SIZE`            | Max avatar file size in bytes            | 5242880                             |
+| `CORS_ORIGINS`                    | Comma-separated allowed origins          | http://localhost:3000               |
+| `DEBUG_PII`                       | Enable PII debugging in auth logs        | false                               |
+| `EMAIL_VERIFICATION_EXPIRES_IN`   | Email verification token TTL             | 24h                                 |
+| `GOOGLE_CLIENT_ID`                | Google OAuth2 client ID                  | —                                   |
+| `GOOGLE_CLIENT_SECRET`            | Google OAuth2 client secret              | —                                   |
+| `GOOGLE_CALLBACK_URL`             | Google OAuth2 callback URL               | /api/auth/google/callback           |
+| `BLOCKCHAIN_ENABLED`              | Enable blockchain integration            | true                                |
+| `BLOCKCHAIN_NETWORK`              | Ethereum network                         | sepolia                             |
+| `BLOCKCHAIN_RPC_URL`              | Ethereum RPC endpoint (validated at boot)                  | —                                   |
+| `BLOCKCHAIN_CONTRACT_ADDRESS`     | Smart contract address (EIP-55 checksum validated at boot) | —                                   |
+| `BLOCKCHAIN_PRIVATE_KEY`          | Wallet private key for signing (validated at boot)           | —                                   |
+| `BACKUP_STORAGE_PATH`             | Directory for DB backup files            | ./backups                           |
+| `PG_DUMP_PATH`                    | Path to pg_dump binary                   | pg_dump                             |
+| `PSQL_PATH`                       | Path to psql binary                      | psql                                |
+| `PROPERTY_IMAGES_UPLOAD_DIR`      | Directory for property images            | ./uploads/properties                |
+| `PROPERTY_IMAGE_MAX_SIZE`         | Max property image size in bytes         | 10485760                            |
+| `PROPERTY_IMAGE_MAX_PER_PROPERTY` | Max images per property                  | 30                                  |
+| `GEOCODING_PROVIDER`              | Geocoding provider (nominatim/google)    | nominatim                           |
+| `NOMINATIM_BASE_URL`              | Nominatim API base URL                   | https://nominatim.openstreetmap.org |
+| `GEOCODING_USER_AGENT`            | User agent for geocoding requests        | PropChain-Backend/1.0               |
+| `GEOCODING_TIMEOUT_MS`            | Geocoding request timeout (ms)           | 5000                                |
+| `GOOGLE_GEOCODING_API_KEY`        | Google Geocoding API key (optional)      | —                                   |
+| `FRAUD_ALERT_RECIPIENTS`          | Comma-separated fraud alert emails       | —                                   |
+| `CACHE_WARMING_ENABLED`           | Enable cache warming on startup          | false                               |
+| `CACHE_WARMING_INTERVAL`          | Cache warming interval (ms)              | —                                   |
+| `TEST_DATABASE_URL`               | PostgreSQL URL for integration tests     | —                                   |
 
 ## 🗄️ Database Setup
 
@@ -149,6 +214,8 @@ npm run test:cov
 npm run test:watch
 ```
 
+For database-backed integration tests, set `TEST_DATABASE_URL` to a dedicated test database. Helper utilities are available in `test/database/prisma-test-helpers.ts` to clean fixtures and reset seeded state between suites.
+
 ## 📁 Project Structure
 
 ```
@@ -167,19 +234,19 @@ prisma/
 
 ## 🔧 Available Scripts
 
-| Command | Description |
-|---------|-------------|
-| `npm run build` | Build the application |
-| `npm run start:dev` | Start in development mode with watch |
-| `npm run start:prod` | Start in production mode |
-| `npm run lint` | Run ESLint with auto-fix |
-| `npm run format` | Format code with Prettier |
-| `npm test` | Run tests |
-| `npm run test:cov` | Run tests with coverage |
-| `npm run migrate` | Run database migrations |
-| `npm run migrate:deploy` | Deploy migrations to production |
-| `npm run db:generate` | Generate Prisma Client |
-| `npm run db:studio` | Open Prisma Studio |
+| Command                  | Description                          |
+| ------------------------ | ------------------------------------ |
+| `npm run build`          | Build the application                |
+| `npm run start:dev`      | Start in development mode with watch |
+| `npm run start:prod`     | Start in production mode             |
+| `npm run lint`           | Run ESLint with auto-fix             |
+| `npm run format`         | Format code with Prettier            |
+| `npm test`               | Run tests                            |
+| `npm run test:cov`       | Run tests with coverage              |
+| `npm run migrate`        | Run database migrations              |
+| `npm run migrate:deploy` | Deploy migrations to production      |
+| `npm run db:generate`    | Generate Prisma Client               |
+| `npm run db:studio`      | Open Prisma Studio                   |
 
 ## 📊 Database Schema
 
@@ -189,6 +256,12 @@ prisma/
 - **Property** - Real estate listings with detailed information
 - **Transaction** - Property transactions with blockchain integration
 - **Document** - Property-related documents and files
+
+## Module Docs
+
+- **Properties module:** [src/properties/README.md](src/properties/README.md#L1)
+- **Transactions module:** [src/transactions/README.md](src/transactions/README.md#L1)
+- **Auth & Users:** [docs/Auth_and_User_APIs.md](docs/Auth_and_User_APIs.md#L1)
 
 ## 🔐 Environment Variables
 
@@ -223,9 +296,11 @@ npm run start:prod
 ## 📝 API Endpoints
 
 ### Health Check
+
 - `GET /api/health` - Application health status
 
 ### Users
+
 - `POST /api/users` - Create user
 - `GET /api/users` - List all users
 - `GET /api/users/:id` - Get user by ID
@@ -233,13 +308,24 @@ npm run start:prod
 - `DELETE /api/users/:id` - Delete user
 
 ### Properties
+
 - `POST /api/properties` - Create property
 - `GET /api/properties` - List all properties
 - `GET /api/properties/:id` - Get property by ID
 - `PUT /api/properties/:id` - Update property
 - `DELETE /api/properties/:id` - Delete property
 
+### Tax Strategy Suggestions
+
+- `GET /api/transactions/:transactionId/tax-strategies` - List tax strategy suggestions for a transaction
+- `POST /api/transactions/:transactionId/tax-strategies` - Create a tax strategy suggestion
+- `PATCH /api/transactions/:transactionId/tax-strategies/:strategyId` - Update a tax strategy suggestion
+
+Tax strategy suggestions are informational only and are not legal or tax advice. See [docs/Tax_Strategy_Suggestions.md](docs/Tax_Strategy_Suggestions.md) for usage details.
+
 ## 🤝 Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines, branch naming conventions, PR expectations, and local test/lint instructions.
 
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/amazing-feature`)
@@ -253,4 +339,25 @@ This project is licensed under the MIT License.
 
 ## 👥 Support
 
-For support, email support@propchain.com or join our Slack channel.
+For support, email support@propchain.com or join our Slack channel
+
+## Developer Requirements — TypeScript & Linting
+
+- **TypeScript strict mode:** The project now enables `strict` TypeScript checks. The base config is in [tsconfig.json](tsconfig.json#L1).
+- **Key compiler flags enforced:** `noImplicitAny`, `strictNullChecks` and related strict checks are enabled for app builds via [tsconfig.app.json](tsconfig.app.json#L1).
+- **ESLint rules:** `@typescript-eslint/no-explicit-any` is set to `error` and explicit boundary/return types are encouraged via `@typescript-eslint/explicit-module-boundary-types` and `@typescript-eslint/explicit-function-return-type` (set to `warn`). See [.eslintrc.js](.eslintrc.js#L1).
+
+Local checks before committing/pushing:
+
+```bash
+# Install
+npm ci
+
+# Run linter (auto-fixable issues)
+npm run lint
+
+# Build to verify TypeScript strict checks
+npm run build
+```
+
+CI: A GitHub Actions workflow (`.github/workflows/ci.yml`) now runs `npm run lint` and `npm run build` on pushes and PRs to `main` to validate the stricter compilation and linting rules.

@@ -142,10 +142,9 @@ export class CacheService {
    * Tag a cache key for grouped invalidation
    */
   private tagKey(tag: string, key: string): void {
-    if (!this.cacheTagMap.has(tag)) {
-      this.cacheTagMap.set(tag, new Set());
-    }
-    this.cacheTagMap.get(tag)!.add(key);
+    const keys = this.cacheTagMap.get(tag) ?? new Set<string>();
+    keys.add(key);
+    this.cacheTagMap.set(tag, keys);
   }
 
   /**
@@ -167,10 +166,7 @@ export class CacheService {
    * Invalidate property-related cache
    */
   async invalidatePropertyCache(propertyId?: string): Promise<void> {
-    const keys = [
-      CACHE_KEYS.PROPERTIES_LIST,
-      CACHE_KEYS.PROPERTIES_FEATURED,
-    ];
+    const keys = [CACHE_KEYS.PROPERTIES_LIST, CACHE_KEYS.PROPERTIES_FEATURED];
     if (propertyId) {
       keys.push(CACHE_KEYS.PROPERTY_BY_ID(propertyId));
     }
@@ -181,10 +177,7 @@ export class CacheService {
    * Invalidate dashboard cache
    */
   async invalidateDashboardCache(userId: string): Promise<void> {
-    const keys = [
-      CACHE_KEYS.DASHBOARD_STATS(userId),
-      CACHE_KEYS.DASHBOARD_ANALYTICS(userId),
-    ];
+    const keys = [CACHE_KEYS.DASHBOARD_STATS(userId), CACHE_KEYS.DASHBOARD_ANALYTICS(userId)];
     await this.delMultiple(keys);
   }
 
@@ -202,9 +195,7 @@ export class CacheService {
   /**
    * Warm up cache for featured properties
    */
-  async warmFeaturedPropertiesCache(
-    factory: () => Promise<any>,
-  ): Promise<void> {
+  async warmFeaturedPropertiesCache(factory: () => Promise<any>): Promise<void> {
     try {
       const data = await factory();
       await this.set(
@@ -222,9 +213,7 @@ export class CacheService {
   /**
    * Warm up cache for trust score leaderboard
    */
-  async warmTrustScoreLeaderboardCache(
-    factory: () => Promise<any>,
-  ): Promise<void> {
+  async warmTrustScoreLeaderboardCache(factory: () => Promise<any>): Promise<void> {
     try {
       const data = await factory();
       await this.set(
@@ -267,6 +256,22 @@ export class CacheService {
       await this.get('__health_check__');
       return true;
     } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Atomic SET NX EX — sets key only if it does not exist.
+   * Returns true if the lock was acquired, false if it was already held.
+   * ttlSeconds: lock expiry to prevent stale locks on crash.
+   */
+  async setNx(key: string, value: string, ttlSeconds: number): Promise<boolean> {
+    try {
+      const client = (this.cacheManager as any).store.getClient();
+      const result = await client.set(key, value, 'EX', ttlSeconds, 'NX');
+      return result === 'OK';
+    } catch (error) {
+      this.logger.error(`Error in setNx for key ${key}:`, error);
       return false;
     }
   }

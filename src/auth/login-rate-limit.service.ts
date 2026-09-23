@@ -1,21 +1,54 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../database/prisma.service';
+import { redactEmail } from './security.utils';
 
 export interface LoginAttemptConfig {
   maxAttempts: number;
   lockoutDurationMinutes: number;
 }
 
+const DEFAULT_MAX_ATTEMPTS = 5;
+const DEFAULT_LOCKOUT_DURATION_MINUTES = 30;
+
 @Injectable()
 export class LoginRateLimitService {
   private readonly logger = new Logger(LoginRateLimitService.name);
   private readonly config: LoginAttemptConfig;
 
-  constructor(private readonly prisma: PrismaService) {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly configService: ConfigService,
+  ) {
     this.config = {
-      maxAttempts: 5,
-      lockoutDurationMinutes: 30,
+      maxAttempts: this.readPositiveInt(
+        'LOGIN_MAX_ATTEMPTS',
+        DEFAULT_MAX_ATTEMPTS,
+      ),
+      lockoutDurationMinutes: this.readPositiveInt(
+        'LOGIN_LOCKOUT_MINUTES',
+        DEFAULT_LOCKOUT_DURATION_MINUTES,
+      ),
     };
+  }
+
+  /**
+   * Read a positive integer from configuration, falling back to a safe default
+   * (with a warning) when the value is missing or invalid (#1190).
+   */
+  private readPositiveInt(key: string, fallback: number): number {
+    const raw = this.configService.get<string>(key);
+    if (raw === undefined || raw.trim() === '') {
+      return fallback;
+    }
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value <= 0) {
+      this.logger.warn(
+        `Invalid value "${raw}" for ${key}; falling back to ${fallback}.`,
+      );
+      return fallback;
+    }
+    return value;
   }
 
   /**
@@ -83,7 +116,7 @@ export class LoginRateLimitService {
 
     if (shouldLock) {
       this.logger.warn(
-        `Account locked due to too many failed login attempts: ${email} (IP: ${ipAddress || 'unknown'})`,
+        `Account locked due to too many failed login attempts: ${redactEmail(email)} (IP: ${ipAddress || 'unknown'})`,
       );
     }
 
@@ -108,7 +141,7 @@ export class LoginRateLimitService {
       },
     });
 
-    this.logger.log(`Successful login: ${email} (IP: ${ipAddress || 'unknown'})`);
+    this.logger.log(`Successful login: ${redactEmail(email)} (IP: ${ipAddress || 'unknown'})`);
   }
 
   /**
@@ -151,7 +184,7 @@ export class LoginRateLimitService {
       },
     });
 
-    this.logger.log(`Account manually unlocked: ${email}`);
+    this.logger.log(`Account manually unlocked: ${redactEmail(email)}`);
   }
 
   /**

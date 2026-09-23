@@ -1,8 +1,57 @@
 import { Module } from '@nestjs/common';
 import { EmailService } from './email.service';
+import { EmailWebhookController } from './email-webhook.controller';
+import { PrismaModule } from '../database/prisma.module';
+import { TrackingModule } from '../tracking/tracking.module';
+import { I18nModule } from '../i18n/i18n.module';
+import { MailerModule } from '@nestjs-modules/mailer';
+import { EjsAdapter } from '@nestjs-modules/mailer/adapters/ejs.adapter';
+import { ConfigService } from '@nestjs/config';
+import { join } from 'path';
+import { BullModule } from '@nestjs/bullmq';
+import { EmailProcessor } from './email.processor';
 
 @Module({
-  providers: [EmailService],
+  imports: [
+    PrismaModule,
+    TrackingModule,
+    I18nModule,
+    BullModule.registerQueue({
+      name: 'mail',
+      defaultJobOptions: {
+        attempts: 3,
+        backoff: {
+          type: 'exponential',
+          delay: 1000,
+        },
+      },
+    }),
+    MailerModule.forRootAsync({
+      useFactory: (config: ConfigService) => ({
+        transport: {
+          host: config.get('MAIL_HOST'),
+          port: config.get('MAIL_PORT'),
+          auth: {
+            user: config.get('MAIL_USER'),
+            pass: config.get('MAIL_PASSWORD'),
+          },
+        },
+        defaults: {
+          from: config.get('MAIL_FROM'),
+        },
+        template: {
+          dir: join(__dirname, 'templates'),
+          adapter: new EjsAdapter(),
+          options: {
+            strict: true,
+          },
+        },
+      }),
+      inject: [ConfigService],
+    }),
+  ],
+  controllers: [EmailWebhookController],
+  providers: [EmailService, EmailProcessor],
   exports: [EmailService],
 })
 export class EmailModule {}

@@ -45,17 +45,21 @@ export const ENDPOINT_RATE_LIMITS: Record<string, { windowMs: number; max: numbe
     windowMs: 60 * 60 * 1000, // 1 hour
     max: 20, // 20 refreshes per hour
   },
+  'POST /auth/email/resend': {
+    windowMs: 60 * 60 * 1000, // 1 hour
+    max: 3, // 3 resends per hour
+  },
   'POST /auth/request-password-reset': {
     windowMs: 60 * 60 * 1000, // 1 hour
     max: 3, // 3 requests per hour
   },
 
   // Email verification (moderate)
-  'POST /email-verification/send': {
+  'POST /users/email/resend': {
     windowMs: 60 * 60 * 1000, // 1 hour
     max: 5, // 5 verification emails per hour
   },
-  'POST /email-verification/verify': {
+  'POST /users/email/verify': {
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 10, // 10 verification attempts
   },
@@ -144,6 +148,7 @@ export const RATE_LIMIT_KEYS = {
   ENDPOINT: (endpoint: string) => `rate-limit:endpoint:${endpoint}`,
   USER: (userId: string) => `rate-limit:user:${userId}`,
   IP: (ip: string) => `rate-limit:ip:${ip}`,
+  USER_IP: (userId: string, ip: string) => `rate-limit:user-ip:${userId}:${ip}`,
   API_KEY: (apiKey: string) => `rate-limit:api-key:${apiKey}`,
 };
 

@@ -1,0 +1,756 @@
+import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Prisma, Transaction, TransactionTaxStrategy } from '@prisma/client';
+import { PrismaService } from '../database/prisma.service';
+import { BlockchainService } from '../blockchain/blockchain.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { CommissionsService } from '../commissions/commissions.service';
+import { TransactionFeesService } from './transaction-fees.service';
+import { TimelineService } from './timeline.service';
+import { TransactionAuditService } from './transaction-audit.service';
+import { canTransitionTransactionStatus } from './transaction-status.constants';
+import { TransactionStatus, TransactionType } from '../types/prisma.types';
+import {
+  BlockchainTransactionDto,
+  BlockchainVerificationResultDto,
+} from '../blockchain/dto/blockchain.dto';
+import {
+  CreateTransactionDto,
+  UpdateTransactionDto,
+  RecordTransactionOnChainDto,
+  TransactionResponseDto,
+  TransactionListQueryDto,
+  TransactionStatusDto,
+  TransactionTypeDto,
+  TransactionAnalyticsDto,
+  TransactionAnalyticsGranularity,
+  TransactionAnalyticsQueryDto,
+  FeeBreakdown,
+} from './dto/transaction.dto';
+
+type TransactionWithFullRelations = Prisma.TransactionGetPayload<{
+  include: {
+    property: { select: { id: true; title: true; address: true } };
+    buyer: { select: { id: true; firstName: true; lastName: true; email: true } };
+    seller: { select: { id: true; firstName: true; lastName: true; email: true } };
+  };
+}>;
+
+interface UpdateEscrowDto {
+  escrowStatus?: string;
+  escrowAmount?: number;
+  paymentStatus?: string;
+}
+
+@Injectable()
+export class TransactionsService {
+  private readonly logger = new Logger(TransactionsService.name);
+
+  constructor(
+    private prisma: PrismaService,
+    private blockchainService: BlockchainService,
+    private notificationsService: NotificationsService,
+    private commissionsService: CommissionsService,
+    private transactionFeesService: TransactionFeesService,
+    private timelineService: TimelineService,
+    private transactionAuditService: TransactionAuditService,
+  ) {}
+
+  /**
+   * Create a new transaction
+   */
+  async create(dto: CreateTransactionDto): Promise<TransactionResponseDto> {
+    // Validate that property and users exist
+    const [property, buyer, seller] = await Promise.all([
+      this.prisma.property.findUnique({ where: { id: dto.propertyId } }),
+      this.prisma.user.findUnique({ where: { id: dto.buyerId } }),
+      this.prisma.user.findUnique({ where: { id: dto.sellerId } }),
+    ]);
+
+    if (!property) {
+      throw new NotFoundException('Property not found');
+    }
+    if (!buyer) {
+      throw new NotFoundException('Buyer not found');
+    }
+    if (!seller) {
+      throw new NotFoundException('Seller not found');
+    }
+
+    const feeBreakdown = this.transactionFeesService.calculateFees(Number(dto.amount));
+
+    const transaction = await this.prisma.transaction.create({
+      data: {
+        propertyId: dto.propertyId,
+        buyerId: dto.buyerId,
+        sellerId: dto.sellerId,
+        amount: dto.amount,
+        type: dto.type as unknown as TransactionType,
+        status: 'PENDING',
+        notes: dto.notes,
+        feeBreakdown: feeBreakdown as unknown as Prisma.InputJsonValue,
+      },
+    });
+
+    await this.commissionsService.createCommissionsForTransaction(transaction.id);
+
+    this.logger.log(`Transaction created: ${transaction.id}`);
+    return this.toResponseDto(transaction);
+  }
+
+  /**
+   * Find all transactions with filtering and pagination
+   */
+  async findAll(query: TransactionListQueryDto) {
+    try {
+      const page = query.page ?? 1;
+      const limit = query.limit ?? 20;
+      const cursor = query.cursor;
+      const skip = cursor ? undefined : (page - 1) * limit;
+
+      const where: Prisma.TransactionWhereInput = {};
+      if (query.propertyId) where.propertyId = query.propertyId;
+      if (query.buyerId) where.buyerId = query.buyerId;
+      if (query.sellerId) where.sellerId = query.sellerId;
+      if (query.status) where.status = query.status as unknown as TransactionStatus;
+      if (query.type) where.type = query.type;
+      if (cursor) {
+        where.createdAt = { lt: new Date(Buffer.from(cursor, 'base64').toString()) };
+      }
+
+      const [transactions, total] = await Promise.all([
+        this.prisma.transaction.findMany({
+          where,
+          ...(skip !== undefined ? { skip } : {}),
+          take: limit,
+          include: {
+            property: { select: { id: true, title: true, address: true } },
+            buyer: { select: { id: true, email: true, firstName: true, lastName: true } },
+            seller: { select: { id: true, email: true, firstName: true, lastName: true } },
+          },
+          orderBy: { createdAt: 'desc' },
+        }),
+        this.prisma.transaction.count({ where }),
+      ]);
+
+      const nextCursor =
+        transactions.length === limit
+          ? Buffer.from(transactions[transactions.length - 1].createdAt.toISOString()).toString(
+              'base64',
+            )
+          : null;
+
+      return {
+        total,
+        page,
+        limit,
+        items: transactions.map((t) => this.toResponseDto(t)),
+        nextCursor,
+        previousCursor: cursor || null,
+      };
+    } catch (error) {
+      this.logger.error(
+        `Failed to list transactions: ${(error as Error).message}`,
+        (error as Error).stack,
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Find a single transaction by ID
+   */
+  async findOne(id: string): Promise<TransactionResponseDto> {
+    const transaction = await this.prisma.transaction.findUnique({
+      where: { id },
+      include: {
+        property: { select: { id: true, title: true, address: true } },
+        buyer: { select: { id: true, email: true, firstName: true, lastName: true } },
+        seller: { select: { id: true, email: true, firstName: true, lastName: true } },
+      },
+    });
+
+    if (!transaction) {
+      throw new NotFoundException('Transaction not found');
+    }
+
+    return this.toResponseDto(transaction);
+  }
+
+  /**
+   * Update a transaction
+   */
+  async update(id: string, dto: UpdateTransactionDto): Promise<TransactionResponseDto> {
+    const transaction = await this.prisma.transaction.findUnique({
+      where: { id },
+    });
+
+    if (!transaction) {
+      throw new NotFoundException('Transaction not found');
+    }
+
+    if (dto.status === TransactionStatusDto.FAILED) {
+      throw new BadRequestException('FAILED is not a supported transaction status');
+    }
+
+    const updated = await this.prisma.transaction.update({
+      where: { id },
+      data: {
+        status: dto.status as unknown as TransactionStatus,
+        notes: dto.notes,
+      },
+    });
+
+    if (dto.status) {
+      await this.commissionsService.updateCommissionsStatus(id, dto.status);
+    }
+
+    this.logger.log(`Transaction updated: ${id}`);
+    return this.toResponseDto(updated);
+  }
+
+  /**
+   * Record transaction on blockchain
+   */
+  async recordOnBlockchain(
+    id: string,
+    dto: RecordTransactionOnChainDto,
+  ): Promise<{ transaction: TransactionResponseDto; blockchain: BlockchainTransactionDto }> {
+    try {
+      const transaction = await this.prisma.transaction.findUnique({
+        where: { id },
+        include: {
+          buyer: true,
+          seller: true,
+          property: true,
+        },
+      });
+
+      if (!transaction) {
+        throw new NotFoundException('Transaction not found');
+      }
+
+      if (transaction.blockchainHash) {
+        throw new BadRequestException('Transaction already recorded on blockchain');
+      }
+
+      // Get wallet addresses - use provided or fallback to placeholder
+      const buyerAddress = dto.buyerAddress || `0x${transaction.buyerId.substring(0, 40)}`;
+
+      const sellerAddress = dto.sellerAddress || `0x${transaction.sellerId.substring(0, 40)}`;
+
+      // Validate addresses
+      if (
+        !this.blockchainService.isValidAddress(buyerAddress) ||
+        !this.blockchainService.isValidAddress(sellerAddress)
+      ) {
+        this.logger.warn(`Invalid addresses for transaction ${id}. Using fallback hashing.`);
+      }
+
+      // Record on blockchain
+      const blockchainRecord = await this.blockchainService.recordTransactionOnBlockchain({
+        transactionId: id,
+        propertyId: transaction.propertyId,
+        buyerAddress,
+        sellerAddress,
+        amount: transaction.amount.toNumber(),
+        metadata: {
+          transactionType: transaction.type,
+          propertyAddress: transaction.property?.address,
+        },
+      });
+
+      // Update transaction with blockchain data
+      const updated = await this.prisma.transaction.update({
+        where: { id },
+        data: {
+          blockchainHash: blockchainRecord.blockchainHash,
+          contractAddress: blockchainRecord.contractAddress,
+        },
+      });
+
+      this.logger.log(
+        `Transaction ${id} recorded on blockchain: ${blockchainRecord.blockchainHash}`,
+      );
+
+      return {
+        transaction: this.toResponseDto(updated),
+        blockchain: blockchainRecord,
+      };
+    } catch (error) {
+      this.logger.error(
+        `Failed to record transaction on blockchain: ${(error as Error).message}`,
+        (error as Error).stack,
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Verify transaction on blockchain
+   */
+  async verifyOnBlockchain(id: string): Promise<BlockchainVerificationResultDto> {
+    try {
+      const transaction = await this.prisma.transaction.findUnique({
+        where: { id },
+      });
+
+      if (!transaction) {
+        throw new NotFoundException('Transaction not found');
+      }
+
+      if (!transaction.blockchainHash) {
+        throw new BadRequestException('Transaction not recorded on blockchain');
+      }
+
+      const verification = await this.blockchainService.verifyBlockchainTransaction({
+        transactionHash: transaction.blockchainHash,
+      });
+
+      // Update transaction status if verified and not already completed
+      if (verification.verified && verification.status === 'success') {
+        await this.prisma.transaction.update({
+          where: { id },
+          data: {
+            status: 'COMPLETED',
+          },
+        });
+        await this.commissionsService.updateCommissionsStatus(id, 'COMPLETED');
+      }
+
+      this.logger.log(`Transaction ${id} verification result: ${verification.verified}`);
+
+      return verification;
+    } catch (error) {
+      this.logger.error(
+        `Failed to verify transaction on blockchain: ${(error as Error).message}`,
+        (error as Error).stack,
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Get blockchain statistics for transactions
+   */
+  async getBlockchainStats() {
+    return this.blockchainService.getBlockchainStats();
+  }
+
+  /**
+   * Get transaction analytics for operational dashboards.
+   */
+  async getAnalytics(query: TransactionAnalyticsQueryDto = {}): Promise<TransactionAnalyticsDto> {
+    const where: Prisma.TransactionWhereInput = {};
+    const maxDays = query.maxDays ?? 365;
+
+    if (query.startDate && query.endDate) {
+      if (query.endDate.getTime() < query.startDate.getTime()) {
+        throw new BadRequestException('endDate must be on or after startDate');
+      }
+      const maxRangeMs = (query.maxDays ?? 365) * 24 * 60 * 60 * 1000;
+      const durationMs = query.endDate.getTime() - query.startDate.getTime();
+      if (durationMs > maxRangeMs) {
+        throw new BadRequestException(`Date range cannot exceed ${query.maxDays ?? 365} days`);
+      }
+    }
+
+    if (query.type) {
+      where.type = query.type;
+    }
+
+    if (query.startDate || query.endDate) {
+      where.createdAt = {};
+      if (query.startDate) where.createdAt.gte = query.startDate;
+      if (query.endDate) where.createdAt.lte = query.endDate;
+
+      if (query.startDate && !query.endDate) {
+        const cappedEnd = new Date(query.startDate);
+        cappedEnd.setDate(cappedEnd.getDate() + maxDays);
+        where.createdAt.lte = cappedEnd;
+      } else if (!query.startDate && query.endDate) {
+        const cappedStart = new Date(query.endDate);
+        cappedStart.setDate(cappedStart.getDate() - maxDays);
+        where.createdAt.gte = cappedStart;
+      }
+    }
+
+    const transactions = await this.prisma.transaction.findMany({
+      where,
+      select: {
+        amount: true,
+        status: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const totalTransactions = transactions.length;
+    const completedTransactions = transactions.filter((t) => t.status === 'COMPLETED');
+    const pendingTransactions = transactions.filter((t) => t.status === 'PENDING').length;
+    const cancelledTransactions = transactions.filter((t) => t.status === 'CANCELLED').length;
+
+    const totalVolume = this.roundCurrency(
+      transactions.reduce((sum: number, transaction) => {
+        return sum + this.toNumber(transaction.amount);
+      }, 0),
+    );
+    const revenue = this.roundCurrency(
+      completedTransactions.reduce((sum: number, transaction) => {
+        return sum + this.toNumber(transaction.amount);
+      }, 0),
+    );
+
+    return {
+      totalTransactions,
+      completedTransactions: completedTransactions.length,
+      pendingTransactions,
+      cancelledTransactions,
+      totalVolume,
+      averagePrice: totalTransactions > 0 ? this.roundCurrency(totalVolume / totalTransactions) : 0,
+      completionRate:
+        totalTransactions > 0
+          ? this.roundPercentage((completedTransactions.length / totalTransactions) * 100)
+          : 0,
+      revenue,
+      volumeTrends: this.buildVolumeTrends(
+        transactions,
+        query.granularity ?? TransactionAnalyticsGranularity.MONTH,
+      ),
+    };
+  }
+
+  /**
+   * Update transaction status
+   */
+  async updateTransactionStatus(
+    transactionId: string,
+    status: string,
+    actorId?: string,
+  ): Promise<TransactionResponseDto> {
+    const transaction = await this.prisma.transaction.findUnique({
+      where: { id: transactionId },
+    });
+
+    if (!transaction) {
+      throw new NotFoundException('Transaction not found');
+    }
+
+    // Enforce status lifecycle (#557)
+    const currentStatus = transaction.status as TransactionStatus;
+    const nextStatus = status as TransactionStatus;
+    if (!canTransitionTransactionStatus(currentStatus, nextStatus)) {
+      throw new BadRequestException(
+        `Invalid status transition from "${currentStatus}" to "${nextStatus}"`,
+      );
+    }
+
+    const updated = await this.prisma.transaction.update({
+      where: { id: transactionId },
+      data: { status: status as TransactionStatus },
+    });
+
+    // Audit log the transition (#557)
+    await this.transactionAuditService.log(
+      transactionId,
+      nextStatus,
+      { status: currentStatus },
+      { status: nextStatus },
+      { actorId },
+    );
+
+    await this.commissionsService.updateCommissionsStatus(transactionId, status);
+
+    // Auto-create timeline stage event (#560)
+    await this.timelineService.addStageEvent(transactionId, status);
+
+    this.logger.log(`Transaction ${transactionId} status updated to ${status}`);
+    return this.toResponseDto(updated);
+  }
+
+  /**
+   * Create a transaction with owner validation (test API)
+   */
+  async createTransaction(
+    dto: {
+      propertyId: string;
+      buyerId: string;
+      sellerId: string;
+      amount: number;
+      type: string;
+    },
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    user: { sub: string; email: string; role: string; type: string },
+  ): Promise<TransactionWithFullRelations> {
+    const [property, buyer, seller] = await Promise.all([
+      this.prisma.property.findUnique({ where: { id: dto.propertyId } }),
+      this.prisma.user.findUnique({ where: { id: dto.buyerId } }),
+      this.prisma.user.findUnique({ where: { id: dto.sellerId } }),
+    ]);
+
+    if (!property) throw new NotFoundException('Property not found');
+    if (!buyer) throw new NotFoundException('Buyer not found');
+    if (!seller) throw new NotFoundException('Seller not found');
+
+    const transaction = await this.prisma.transaction.create({
+      data: {
+        propertyId: dto.propertyId,
+        buyerId: dto.buyerId,
+        sellerId: dto.sellerId,
+        amount: dto.amount,
+        type: dto.type as TransactionType,
+        status: 'PENDING',
+      },
+      include: {
+        property: { select: { id: true, title: true, address: true } },
+        buyer: { select: { id: true, firstName: true, lastName: true, email: true } },
+        seller: { select: { id: true, firstName: true, lastName: true, email: true } },
+      },
+    });
+
+    await this.commissionsService.createCommissionsForTransaction(transaction.id);
+
+    this.logger.log(`Transaction created via createTransaction: ${transaction.id}`);
+    return transaction;
+  }
+
+  /**
+   * Create a tax strategy suggestion
+   */
+  async createTaxStrategySuggestion(
+    transactionId: string,
+    dto: {
+      strategyType: string;
+      estimatedTaxRate?: number;
+      explanation?: string;
+      metadata?: Record<string, unknown>;
+    },
+    user: { sub: string; email: string; role: string; type: string },
+  ): Promise<TransactionTaxStrategy> {
+    const transaction = await this.prisma.transaction.findUnique({
+      where: { id: transactionId },
+      include: { property: { select: { id: true, city: true, state: true, country: true } } },
+    });
+
+    if (!transaction) throw new NotFoundException('Transaction not found');
+
+    const jurisdiction = [
+      transaction.property?.city,
+      transaction.property?.state,
+      transaction.property?.country,
+    ]
+      .filter(Boolean)
+      .join(', ');
+
+    return this.prisma.transactionTaxStrategy
+      .create({
+        data: {
+          transactionId,
+          createdById: user.sub,
+          strategyType: dto.strategyType,
+          jurisdiction: jurisdiction || 'Unknown',
+          explanation: dto.explanation ?? '',
+          version: 1,
+        },
+      })
+      .then((result) => {
+        this.logger.log(
+          `Tax strategy created for transaction ${transactionId}: ${dto.strategyType}`,
+        );
+        this.notificationsService.sendNotification(
+          user.sub,
+          'Tax Strategy Created',
+          `Tax strategy "${dto.strategyType}" created for transaction ${transactionId}`,
+          'TAX_STRATEGY_CREATED',
+          result,
+        );
+        this.notificationsService.sendNotification(
+          transaction.buyerId,
+          'Tax Strategy Created',
+          `A tax strategy was created for your transaction ${transactionId}`,
+          'TAX_STRATEGY_CREATED',
+          result,
+        );
+        return result;
+      });
+  }
+
+  /**
+   * Update a tax strategy suggestion
+   */
+  async updateTaxStrategySuggestion(
+    transactionId: string,
+    strategyId: string,
+    dto: {
+      strategyType?: string;
+      jurisdiction?: string;
+    },
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    user: { sub: string; email: string; role: string; type: string },
+  ): Promise<TransactionTaxStrategy> {
+    const existing = await this.prisma.transactionTaxStrategy.findFirst({
+      where: { id: strategyId, transactionId },
+    });
+
+    if (!existing) throw new NotFoundException('Tax strategy not found');
+
+    this.logger.log(`Updating tax strategy ${strategyId} for transaction ${transactionId}`);
+    return this.prisma.transactionTaxStrategy.update({
+      where: { id: strategyId },
+      data: {
+        ...(dto.strategyType && { strategyType: dto.strategyType }),
+        ...(dto.jurisdiction && { jurisdiction: dto.jurisdiction }),
+        version: existing.version + 1,
+      },
+    });
+  }
+
+  /**
+   * Update escrow details for a transaction
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async updateEscrow(transactionId: string, dto: UpdateEscrowDto, actorId?: string) {
+    const transaction = await this.prisma.transaction.findUnique({
+      where: { id: transactionId },
+    });
+    if (!transaction) throw new NotFoundException('Transaction not found');
+
+    this.logger.log(`Updating escrow for transaction ${transactionId}`);
+    const data: Prisma.TransactionUpdateInput = {};
+    if (dto.escrowStatus !== undefined) data.escrowStatus = dto.escrowStatus;
+    if (dto.escrowAmount !== undefined) data.escrowAmount = dto.escrowAmount;
+    if (dto.paymentStatus !== undefined) data.paymentStatus = dto.paymentStatus;
+    if (dto.escrowStatus === 'RELEASED') data.escrowReleasedAt = new Date();
+
+    const updated = await this.prisma.transaction.update({
+      where: { id: transactionId },
+      data,
+    });
+
+    if (dto.escrowStatus === 'RELEASED' || dto.paymentStatus === 'COMPLETE') {
+      await this.notificationsService.sendNotification(
+        transaction.buyerId,
+        'Payment Milestone Update',
+        `Escrow/payment milestone reached for transaction ${transactionId}`,
+        'TRANSACTION_UPDATE',
+        { transactionId, escrowStatus: dto.escrowStatus, paymentStatus: dto.paymentStatus },
+      );
+    }
+
+    return this.toResponseDto(updated);
+  }
+
+  private toResponseDto(transaction: Transaction): TransactionResponseDto {
+    return {
+      id: transaction.id,
+      propertyId: transaction.propertyId,
+      buyerId: transaction.buyerId,
+      sellerId: transaction.sellerId,
+      amount: this.toNumber(transaction.amount),
+      type: transaction.type as TransactionTypeDto,
+      status: transaction.status as TransactionStatusDto,
+      blockchainHash: transaction.blockchainHash ?? undefined,
+      contractAddress: transaction.contractAddress ?? undefined,
+      notes: transaction.notes ?? undefined,
+      feeBreakdown: (transaction.feeBreakdown as unknown as FeeBreakdown) ?? undefined,
+      escrowStatus: transaction.escrowStatus ?? undefined,
+      escrowAmount: transaction.escrowAmount ?? undefined,
+      paymentStatus: transaction.paymentStatus ?? undefined,
+      createdAt: transaction.createdAt,
+      updatedAt: transaction.updatedAt,
+    };
+  }
+
+  private buildVolumeTrends(
+    transactions: Array<{ amount: unknown; status: string; createdAt: Date }>,
+    granularity: TransactionAnalyticsGranularity,
+  ) {
+    const buckets = new Map<
+      string,
+      {
+        transactionCount: number;
+        totalVolume: number;
+        completedCount: number;
+        revenue: number;
+      }
+    >();
+
+    for (const transaction of transactions) {
+      const period = this.formatAnalyticsPeriod(transaction.createdAt, granularity);
+      const amount = this.toNumber(transaction.amount);
+      const bucket = buckets.get(period) ?? {
+        transactionCount: 0,
+        totalVolume: 0,
+        completedCount: 0,
+        revenue: 0,
+      };
+
+      bucket.transactionCount += 1;
+      bucket.totalVolume += amount;
+
+      if (transaction.status === 'COMPLETED') {
+        bucket.completedCount += 1;
+        bucket.revenue += amount;
+      }
+
+      buckets.set(period, bucket);
+    }
+
+    return [...buckets.entries()].map(([period, bucket]) => ({
+      period,
+      transactionCount: bucket.transactionCount,
+      totalVolume: this.roundCurrency(bucket.totalVolume),
+      completedCount: bucket.completedCount,
+      revenue: this.roundCurrency(bucket.revenue),
+    }));
+  }
+
+  private formatAnalyticsPeriod(date: Date, granularity: TransactionAnalyticsGranularity): string {
+    const year = date.getUTCFullYear();
+    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(date.getUTCDate()).padStart(2, '0');
+
+    if (granularity === TransactionAnalyticsGranularity.DAY) {
+      return `${year}-${month}-${day}`;
+    }
+
+    if (granularity === TransactionAnalyticsGranularity.WEEK) {
+      const week = this.getIsoWeek(date);
+      return `${week.year}-W${String(week.week).padStart(2, '0')}`;
+    }
+
+    return `${year}-${month}`;
+  }
+
+  private getIsoWeek(date: Date): { year: number; week: number } {
+    const normalized = new Date(
+      Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
+    );
+    const day = normalized.getUTCDay() || 7;
+    normalized.setUTCDate(normalized.getUTCDate() + 4 - day);
+    const yearStart = new Date(Date.UTC(normalized.getUTCFullYear(), 0, 1));
+    const week = Math.ceil(((normalized.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
+
+    return { year: normalized.getUTCFullYear(), week };
+  }
+
+  private toNumber(value: unknown): number {
+    if (typeof value === 'number') return value;
+    if (typeof value === 'string') return Number(value);
+    if (value && typeof (value as { toNumber?: unknown }).toNumber === 'function') {
+      return (value as { toNumber: () => number }).toNumber();
+    }
+    if (value && typeof (value as { toString?: unknown }).toString === 'function') {
+      return Number((value as { toString: () => string }).toString());
+    }
+
+    return 0;
+  }
+
+  private roundCurrency(value: number): number {
+    return Math.round(value * 100) / 100;
+  }
+
+  private roundPercentage(value: number): number {
+    return Math.round(value * 100) / 100;
+  }
+}

@@ -25,7 +25,7 @@ export class CreateActivityLogDto {
 
   @IsOptional()
   @IsJSON()
-  metadata?: any;
+  metadata?: Record<string, unknown>;
 }
 
 export class GetActivityLogsDto {

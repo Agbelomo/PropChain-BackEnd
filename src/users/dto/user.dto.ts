@@ -1,6 +1,7 @@
 import {
   IsEmail,
   IsOptional,
+  IsPhoneNumber,
   IsString,
   MinLength,
   IsIn,
@@ -9,6 +10,7 @@ import {
   Min,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { InputType, Field } from '@nestjs/graphql';
 
 export class UpdatePreferencesDto {
   @IsOptional()
@@ -46,7 +48,7 @@ export class CreateUserDto {
   lastName: string;
 
   @IsOptional()
-  @IsString()
+  @IsPhoneNumber(undefined, { message: 'Please provide a valid phone number' })
   phone?: string;
 
   @IsOptional()
@@ -73,41 +75,42 @@ export class CreateUserDto {
   referralCode?: string;
 }
 
+@InputType()
 export class UpdateUserDto {
+  @Field({ nullable: true })
   @IsOptional()
   @IsEmail()
   email?: string;
 
+  @Field({ nullable: true })
   @IsOptional()
   @IsString()
   firstName?: string;
 
+  @Field({ nullable: true })
   @IsOptional()
   @IsString()
   lastName?: string;
 
+  @Field({ nullable: true })
   @IsOptional()
-  @IsString()
+  @IsPhoneNumber(undefined, { message: 'Please provide a valid phone number' })
   phone?: string;
 
+  @Field({ nullable: true })
   @IsOptional()
   @IsIn(['email', 'sms', 'phone'])
   preferredChannel?: string;
 
+  @Field({ nullable: true })
   @IsOptional()
   @IsString()
   languagePreference?: string;
 
+  @Field({ nullable: true })
   @IsOptional()
   @IsString()
   timezone?: string;
-
-  @IsOptional()
-  @IsObject()
-  contactHours?: {
-    start: string;
-    end: string;
-  };
 }
 export class SearchUsersDto {
   @IsOptional()
@@ -133,4 +136,18 @@ export class SearchUsersDto {
   @IsInt()
   @Min(1)
   limit?: number = 10;
+}
+
+export class UpdateUserProfileDto {
+  @IsOptional()
+  @IsString()
+  firstName?: string;
+
+  @IsOptional()
+  @IsString()
+  lastName?: string;
+
+  @IsOptional()
+  @IsString()
+  phone?: string;
 }

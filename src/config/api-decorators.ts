@@ -11,6 +11,7 @@ import {
   ApiQuery,
   ApiBearerAuth,
   ApiHeader,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   ApiSecurity,
 } from '@nestjs/swagger';
 

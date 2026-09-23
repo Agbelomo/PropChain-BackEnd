@@ -40,11 +40,22 @@ export interface ApiKey {
   keyHash: string;
   permissions: string[];
   usageCount: number;
+  monthlyQuota: number | null;
   lastUsedAt: Date | null;
   expiresAt: Date | null;
   revokedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface TransactionHistory {
+  id: string;
+  transactionId: string;
+  status: string;
+  actorId: string | null;
+  notes: string | null;
+  metadata: any | null;
+  createdAt: Date;
 }
 
 export enum TokenType {
@@ -58,6 +69,12 @@ export enum UserRole {
   AGENT = 'AGENT',
 }
 
+export enum UserTier {
+  FREE = 'FREE',
+  PREMIUM = 'PREMIUM',
+  ENTERPRISE = 'ENTERPRISE',
+}
+
 export enum PropertyStatus {
   DRAFT = 'DRAFT',
   PENDING = 'PENDING',
@@ -66,6 +83,7 @@ export enum PropertyStatus {
   SOLD = 'SOLD',
   RENTED = 'RENTED',
   ARCHIVED = 'ARCHIVED',
+  EXPIRED = 'EXPIRED',
 }
 
 export enum TransactionType {
@@ -78,7 +96,77 @@ export enum TransactionStatus {
   PENDING = 'PENDING',
   COMPLETED = 'COMPLETED',
   CANCELLED = 'CANCELLED',
-  FAILED = 'FAILED',
+}
+
+export enum FraudSeverity {
+  LOW = 'LOW',
+  MEDIUM = 'MEDIUM',
+  HIGH = 'HIGH',
+  CRITICAL = 'CRITICAL',
+}
+
+export enum FraudStatus {
+  OPEN = 'OPEN',
+  INVESTIGATING = 'INVESTIGATING',
+  RESOLVED = 'RESOLVED',
+  DISMISSED = 'DISMISSED',
+}
+
+export enum FraudPattern {
+  EXCESSIVE_FAILED_LOGINS = 'EXCESSIVE_FAILED_LOGINS',
+  SHARED_IP_MULTIPLE_ACCOUNTS = 'SHARED_IP_MULTIPLE_ACCOUNTS',
+  MULTIPLE_IPS_FOR_ACCOUNT = 'MULTIPLE_IPS_FOR_ACCOUNT',
+  NEW_DEVICE_LOGIN = 'NEW_DEVICE_LOGIN',
+  TOKEN_REUSE = 'TOKEN_REUSE',
+  RAPID_PROPERTY_LISTINGS = 'RAPID_PROPERTY_LISTINGS',
+  DUPLICATE_PROPERTY_ADDRESS = 'DUPLICATE_PROPERTY_ADDRESS',
+  HIGH_VALUE_NEW_ACCOUNT_LISTING = 'HIGH_VALUE_NEW_ACCOUNT_LISTING',
+  DUPLICATE_PROPERTY_IMAGES = 'DUPLICATE_PROPERTY_IMAGES',
+  VELOCITY_EXCEEDED = 'VELOCITY_EXCEEDED',
+  IMPOSSIBLE_TRAVEL = 'IMPOSSIBLE_TRAVEL',
+  DEVICE_FINGERPRINT_MISMATCH = 'DEVICE_FINGERPRINT_MISMATCH',
+}
+
+export enum DisputeStatus {
+  OPEN = 'OPEN',
+  UNDER_REVIEW = 'UNDER_REVIEW',
+  RESOLVED = 'RESOLVED',
+  CANCELLED = 'CANCELLED',
+}
+
+export enum MilestoneStatus {
+  PENDING = 'PENDING',
+  COMPLETED = 'COMPLETED',
+  DELAYED = 'DELAYED',
+}
+
+export enum SpamAction {
+  NONE = 'NONE',
+  COMPLAINED = 'COMPLAINED',
+  UNSUBSCRIBED = 'UNSUBSCRIBED',
+}
+
+export interface PropertyAgent {
+  id: string;
+  propertyId: string;
+  agentId: string;
+  commissionRate: number;
+  contactPhone: string | null;
+  contactEmail: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface Commission {
+  id: string;
+  transactionId: string;
+  agentId: string;
+  propertyId: string;
+  amount: number;
+  rate: number;
+  status: string;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 export namespace Prisma {

@@ -34,6 +34,7 @@ export const API_CHANGELOG: ChangelogEntry[] = [
       'Two-factor authentication support',
       'API key authentication for server-to-server',
       'Activity logging for audit trails',
+      'Informational tax strategy suggestions for transactions',
     ],
     improvements: [
       'Improved response times with indexed queries',
@@ -163,6 +164,7 @@ export function getBreakingChangesSince(version: string): string[] {
 /**
  * Check if there are critical updates between versions
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export function hasCriticalUpdates(fromVersion: string, toVersion: string): boolean {
   const hasBreakingChanges = getBreakingChangesSince(fromVersion).length > 0;
   return hasBreakingChanges;

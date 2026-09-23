@@ -1,21 +1,29 @@
 import {
   Controller,
   Get,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   Post,
   Delete,
   Param,
   UseGuards,
   HttpCode,
   HttpStatus,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   Body,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { RateLimitService, RateLimitStatus } from '../rate-limit.service';
 import { SkipRateLimit } from '../guards/rate-limit.guard';
+import { JwtAuthGuard } from '../guards/jwt-auth.guard';
+import { RolesGuard } from '../guards/roles.guard';
+import { Roles } from '../decorators/roles.decorator';
+import { UserRole } from '../../types/prisma.types';
 
 @ApiTags('Admin - Rate Limiting')
 @Controller('admin/rate-limits')
 @ApiBearerAuth('JWT')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(UserRole.ADMIN)
 export class RateLimitAdminController {
   constructor(private rateLimitService: RateLimitService) {}
 
@@ -39,9 +47,7 @@ export class RateLimitAdminController {
       },
     },
   })
-  async getUserRateLimitStatus(
-    @Param('userId') userId: string,
-  ): Promise<any> {
+  async getUserRateLimitStatus(@Param('userId') userId: string): Promise<any> {
     return this.rateLimitService.getUserRateLimitStats(userId);
   }
 
@@ -55,9 +61,7 @@ export class RateLimitAdminController {
     status: 200,
     description: 'Endpoint rate limit status retrieved successfully',
   })
-  async getEndpointRateLimitStatus(
-    @Param('endpoint') endpoint: string,
-  ): Promise<RateLimitStatus> {
+  async getEndpointRateLimitStatus(@Param('endpoint') endpoint: string): Promise<RateLimitStatus> {
     return this.rateLimitService.checkEndpointRateLimit(endpoint);
   }
 
@@ -100,9 +104,7 @@ export class RateLimitAdminController {
     status: 204,
     description: 'Endpoint rate limit reset successfully',
   })
-  async resetEndpointRateLimit(
-    @Param('endpoint') endpoint: string,
-  ): Promise<void> {
+  async resetEndpointRateLimit(@Param('endpoint') endpoint: string): Promise<void> {
     return this.rateLimitService.resetEndpointRateLimit(endpoint);
   }
 
@@ -124,8 +126,7 @@ export class RateLimitAdminController {
   @SkipRateLimit()
   @ApiOperation({
     summary: 'Get rate limiting summary',
-    description:
-      'Retrieve information about all configured rate limits and their current status',
+    description: 'Retrieve information about all configured rate limits and their current status',
   })
   @ApiResponse({
     status: 200,

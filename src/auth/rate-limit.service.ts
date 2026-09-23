@@ -1,4 +1,4 @@
-import { Injectable, Inject } from '@nestjs/common';
+import { Injectable, Inject, Logger } from '@nestjs/common';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import {
@@ -24,6 +24,8 @@ export interface RateLimitRecord {
 
 @Injectable()
 export class RateLimitService {
+  private readonly logger = new Logger(RateLimitService.name);
+
   constructor(@Inject(CACHE_MANAGER) private cacheManager: Cache) {}
 
   /**
@@ -107,18 +109,10 @@ export class RateLimitService {
 
       // Store the updated record
       if (!isExceeded) {
-        await this.cacheManager.set(
-          key,
-          { count, resetAt, windowMs },
-          resetAt - now,
-        );
+        await this.cacheManager.set(key, { count, resetAt, windowMs }, resetAt - now);
       } else {
         // Still store the count for tracking
-        await this.cacheManager.set(
-          key,
-          { count, resetAt, windowMs },
-          resetAt - now,
-        );
+        await this.cacheManager.set(key, { count, resetAt, windowMs }, resetAt - now);
       }
 
       const remaining = Math.max(0, limit - count);
@@ -133,7 +127,7 @@ export class RateLimitService {
       };
     } catch (error) {
       // If cache is unavailable, allow the request
-      console.error('Rate limit check failed:', error);
+      this.logger.error('Rate limit check failed:', error instanceof Error ? error.stack : error);
       return {
         limit,
         remaining: limit - 1,
@@ -173,6 +167,18 @@ export class RateLimitService {
   async resetApiKeyRateLimit(apiKey: string): Promise<void> {
     const key = RATE_LIMIT_KEYS.API_KEY(apiKey);
     await this.cacheManager.del(key);
+  }
+
+  /**
+   * Check rate limit for a user tied to a specific IP
+   * Prevents abuse from multiple accounts on the same IP or a single user hopping IPs
+   */
+  async checkUserIpRateLimit(userId: string, ip: string): Promise<RateLimitStatus> {
+    const key = RATE_LIMIT_KEYS.USER_IP(userId, ip);
+    const limit = 200; // Combined user+IP limit
+    const windowMs = 15 * 60 * 1000; // 15 minutes
+
+    return this.checkRateLimit(key, limit, windowMs);
   }
 
   /**
