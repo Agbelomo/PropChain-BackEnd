@@ -6,6 +6,19 @@ const REQUIRED_ENV_VARS = ['DATABASE_URL', 'JWT_SECRET', 'JWT_REFRESH_SECRET'] a
 const JWT_SECRET_VARS = ['JWT_SECRET', 'JWT_REFRESH_SECRET'] as const;
 const MIN_JWT_SECRET_LENGTH = 32;
 
+/**
+ * Whether CAPTCHA verification is required at runtime (#1194).
+ *
+ * CAPTCHA is required by default (docs recommend keeping it on in production)
+ * and is only disabled when CAPTCHA_BYPASS=true is explicitly set for
+ * development. When required, a missing RECAPTCHA_SECRET is a fatal
+ * configuration error that must abort boot instead of surfacing as an opaque
+ * 500 during login.
+ */
+export function isCaptchaRequired(): boolean {
+  return process.env.CAPTCHA_BYPASS !== 'true';
+}
+
 export function validateEnvironment(): void {
   const MISSING: string[] = [];
   const WEAK: string[] = [];
@@ -14,6 +27,15 @@ export function validateEnvironment(): void {
     if (!process.env[key]) {
       MISSING.push(key);
     }
+  }
+
+  // #1194 – fail fast at boot when CAPTCHA is required but the secret is
+  // absent. This prevents the request-time 500 caused by a missing secret.
+  if (isCaptchaRequired() && !process.env.RECAPTCHA_SECRET) {
+    MISSING.push(
+      'RECAPTCHA_SECRET (required because CAPTCHA_BYPASS != true; ' +
+        'set CAPTCHA_BYPASS=true for development environments without reCAPTCHA)',
+    );
   }
 
   for (const key of JWT_SECRET_VARS) {

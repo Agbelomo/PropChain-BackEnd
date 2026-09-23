@@ -4,6 +4,7 @@ import {
   Logger,
   NotFoundException,
   Optional,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -1668,8 +1669,12 @@ export class AuthService {
     }
 
     if (!secret) {
-      throw new Error(
-        'RECAPTCHA_SECRET is not configured. Set CAPTCHA_BYPASS=true for development environments.',
+      // Defensive: boot-time validation catches this in validateEnvironment().
+      // At request time we must never surface a bare 500 for a configuration
+      // problem – return a stable 503 instead.
+      throw new ServiceUnavailableException(
+        'CAPTCHA verification is temporarily unavailable.',
+        'CAPTCHA_SERVICE_UNAVAILABLE',
       );
     }
 
