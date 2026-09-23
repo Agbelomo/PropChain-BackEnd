@@ -134,9 +134,9 @@ The application uses environment variables for configuration. Copy `.env.example
 | `GOOGLE_CALLBACK_URL`             | Google OAuth2 callback URL               | /api/auth/google/callback           |
 | `BLOCKCHAIN_ENABLED`              | Enable blockchain integration            | true                                |
 | `BLOCKCHAIN_NETWORK`              | Ethereum network                         | sepolia                             |
-| `BLOCKCHAIN_RPC_URL`              | Ethereum RPC endpoint                    | —                                   |
-| `BLOCKCHAIN_CONTRACT_ADDRESS`     | Smart contract address                   | —                                   |
-| `BLOCKCHAIN_PRIVATE_KEY`          | Wallet private key for signing           | —                                   |
+| `BLOCKCHAIN_RPC_URL`              | Ethereum RPC endpoint (validated at boot)                  | —                                   |
+| `BLOCKCHAIN_CONTRACT_ADDRESS`     | Smart contract address (EIP-55 checksum validated at boot) | —                                   |
+| `BLOCKCHAIN_PRIVATE_KEY`          | Wallet private key for signing (validated at boot)           | —                                   |
 | `BACKUP_STORAGE_PATH`             | Directory for DB backup files            | ./backups                           |
 | `PG_DUMP_PATH`                    | Path to pg_dump binary                   | pg_dump                             |
 | `PSQL_PATH`                       | Path to psql binary                      | psql                                |
