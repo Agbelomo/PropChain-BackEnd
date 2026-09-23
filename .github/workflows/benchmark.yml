@@ -63,7 +63,7 @@ jobs:
 
       - name: Start application
         run: |
-          npm run start:dist &
+          node dist/main &
           for i in $(seq 1 30); do
             if curl -s http://localhost:3000/api > /dev/null 2>&1; then
               echo "Server is up"
@@ -72,11 +72,16 @@ jobs:
             echo "Waiting for server... ($i)"
             sleep 2
           done
+          # Fail fast if the server never came up, so a broken boot doesn't
+          # produce a misleading "all endpoints failed" report.
+          if ! curl -s http://localhost:3000/healthz > /dev/null 2>&1; then
+            echo "Server failed to start" >&2
+            exit 1
+          fi
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test
-          REDIS_URL: redis://localhost:6379
-          JWT_SECRET: bench-secret
-          JWT_REFRESH_SECRET: bench-refresh-secret
+          JWT_SECRET: bench-secret-bench-secret-bench-secret-1234
+          JWT_REFRESH_SECRET: bench-refresh-secret-bench-refresh-1234
           NODE_ENV: production
 
       - name: Run benchmarks
