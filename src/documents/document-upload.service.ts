@@ -1,4 +1,5 @@
 import { Injectable, BadRequestException, Logger } from '@nestjs/common';
+import { hasKnownSignature, matchesMagicBytes } from '../common/security/magic-bytes';
 
 const ALLOWED_MIME_TYPES = new Set([
   'application/pdf',
@@ -18,14 +19,6 @@ const MIME_SIZE_LIMITS: Record<string, number> = {
   'application/pdf': 25 * 1024 * 1024,
   'application/msword': 15 * 1024 * 1024,
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 15 * 1024 * 1024,
-};
-
-const MAGIC_BYTES: Record<string, number[][]> = {
-  'application/pdf': [[0x25, 0x50, 0x44, 0x46]],
-  'image/jpeg': [[0xff, 0xd8, 0xff]],
-  'image/png': [[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]],
-  'image/webp': [[0x52, 0x49, 0x46, 0x46]],
-  'image/avif': [[0x00, 0x00, 0x00]],
 };
 
 const THREAT_PATTERNS = [
@@ -89,26 +82,30 @@ export class DocumentUploadService {
    * Validate file signature (magic bytes) against the expected MIME type.
    */
   validateMagicBytes(buffer: Buffer, expectedMime: string): boolean {
-    const signatures = MAGIC_BYTES[expectedMime];
-    if (!signatures) {
-      return true;
+    return matchesMagicBytes(buffer, expectedMime);
+  }
+
+  /**
+   * Content-sniff a buffer and reject a mismatched MIME type with a 400.
+   * Rejects empty and truncated buffers; PDFs are additionally checked for a
+   * trailing EOF marker so a polyglot with a valid header is still rejected.
+   */
+  assertValidContent(buffer: Buffer, expectedMime: string): void {
+    if (!hasKnownSignature(expectedMime)) {
+      throw new BadRequestException(
+        `Rejected file with declared type ${expectedMime}: no content signature is registered`,
+      );
     }
-    for (const sig of signatures) {
-      if (buffer.length < sig.length) {
-        continue;
-      }
-      let match = true;
-      for (let i = 0; i < sig.length; i++) {
-        if (buffer[i] !== sig[i]) {
-          match = false;
-          break;
-        }
-      }
-      if (match) {
-        return true;
-      }
+    if (!buffer || buffer.length === 0) {
+      throw new BadRequestException(
+        `Rejected file with declared type ${expectedMime}: content is empty`,
+      );
     }
-    return false;
+    if (!matchesMagicBytes(buffer, expectedMime)) {
+      throw new BadRequestException(
+        `File content does not match declared type ${expectedMime}: magic bytes mismatch`,
+      );
+    }
   }
 
   /**

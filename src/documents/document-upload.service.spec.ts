@@ -104,9 +104,18 @@ describe('DocumentUploadService', () => {
   });
 
   describe('validateMagicBytes', () => {
-    it('should validate PDF magic bytes', () => {
-      const pdfBuffer = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]);
+    it('should validate PDF magic bytes (header + trailing EOF marker)', () => {
+      const pdfBuffer = Buffer.concat([
+        Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]),
+        Buffer.from('1 0 obj\n<< /Type /Catalog >>\nendobj\n'),
+        Buffer.from('%%EOF'),
+      ]);
       expect(service.validateMagicBytes(pdfBuffer, 'application/pdf')).toBe(true);
+    });
+
+    it('should reject a PDF whose header is valid but has no EOF trailer', () => {
+      const pdfBuffer = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]);
+      expect(service.validateMagicBytes(pdfBuffer, 'application/pdf')).toBe(false);
     });
 
     it('should reject wrong magic bytes', () => {
@@ -124,9 +133,34 @@ describe('DocumentUploadService', () => {
       expect(service.validateMagicBytes(pngBuffer, 'image/png')).toBe(true);
     });
 
-    it('should validate WebP magic bytes', () => {
-      const webpBuffer = Buffer.from([0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00]);
+    it('should validate WebP magic bytes (RIFF + WEBP marker)', () => {
+      const webpBuffer = Buffer.from([0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50]);
       expect(service.validateMagicBytes(webpBuffer, 'image/webp')).toBe(true);
+    });
+
+    it('should reject a RIFF file that is not WebP (no WEBP marker)', () => {
+      const wavBuffer = Buffer.from([0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45]);
+      expect(service.validateMagicBytes(wavBuffer, 'image/webp')).toBe(false);
+    });
+
+    it('should validate AVIF magic bytes (ftyp box, avif brand)', () => {
+      const avifBuffer = Buffer.from([0x00, 0x00, 0x00, 0x1c, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66]);
+      expect(service.validateMagicBytes(avifBuffer, 'image/avif')).toBe(true);
+    });
+
+    it('should validate legacy .doc magic bytes (OLE2)', () => {
+      const docBuffer = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+      expect(service.validateMagicBytes(docBuffer, 'application/msword')).toBe(true);
+    });
+
+    it('should validate .docx magic bytes (ZIP container)', () => {
+      const docxBuffer = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00]);
+      expect(
+        service.validateMagicBytes(
+          docxBuffer,
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        ),
+      ).toBe(true);
     });
 
     it('should return true for unknown MIME types', () => {
@@ -137,6 +171,69 @@ describe('DocumentUploadService', () => {
     it('should handle buffer shorter than signature', () => {
       const shortBuf = Buffer.from([0x25]);
       expect(service.validateMagicBytes(shortBuf, 'application/pdf')).toBe(false);
+    });
+
+    it('should reject empty buffers', () => {
+      expect(service.validateMagicBytes(Buffer.alloc(0), 'image/jpeg')).toBe(false);
+    });
+  });
+
+  describe('assertValidContent', () => {
+    it('should reject a spoofed extension (jpg declared, PDF actual) with 400', () => {
+      const pdfBuffer = Buffer.concat([
+        Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]),
+        Buffer.from('%%EOF'),
+      ]);
+      expect(() => service.assertValidContent(pdfBuffer, 'image/jpeg')).toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('should reject empty content with 400', () => {
+      expect(() => service.assertValidContent(Buffer.alloc(0), 'image/jpeg')).toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('should reject truncated content (header only, no trailer) with 400', () => {
+      const truncatedPdf = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]);
+      expect(() => service.assertValidContent(truncatedPdf, 'application/pdf')).toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('should reject a polyglot file (valid header, embedded script body)', () => {
+      const jpegHeader = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+      const polyglot = Buffer.concat([jpegHeader, Buffer.from('<script>alert(1)</script>')]);
+      expect(() => service.assertValidContent(polyglot, 'image/png')).toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('should accept all supported types', () => {
+      const pdf = Buffer.concat([
+        Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]),
+        Buffer.from('%%EOF'),
+      ]);
+      const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+      const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      const webp = Buffer.from([0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50]);
+      const avif = Buffer.from([0x00, 0x00, 0x00, 0x1c, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66]);
+      const doc = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+      const docx = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00]);
+
+      expect(() => service.assertValidContent(pdf, 'application/pdf')).not.toThrow();
+      expect(() => service.assertValidContent(jpeg, 'image/jpeg')).not.toThrow();
+      expect(() => service.assertValidContent(png, 'image/png')).not.toThrow();
+      expect(() => service.assertValidContent(webp, 'image/webp')).not.toThrow();
+      expect(() => service.assertValidContent(avif, 'image/avif')).not.toThrow();
+      expect(() => service.assertValidContent(doc, 'application/msword')).not.toThrow();
+      expect(() =>
+        service.assertValidContent(
+          docx,
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        ),
+      ).not.toThrow();
     });
   });
 
