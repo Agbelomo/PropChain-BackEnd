@@ -43,6 +43,8 @@ export class GeocodingService {
   private readonly nominatimBaseUrl: string;
   private readonly userAgent: string;
   private readonly timeoutMs: number;
+  private lastNominatimRequestTime = 0;
+  private readonly minNominatimDelayMs = 1000;
 
   constructor(private readonly configService: ConfigService) {
     const explicitProvider = this.configService.get<string>('GEOCODING_PROVIDER', '').toLowerCase();
@@ -64,6 +66,13 @@ export class GeocodingService {
       'PropChain-Backend/1.0 (geocoding)',
     );
     this.timeoutMs = this.configService.get<number>('GEOCODING_TIMEOUT_MS', 5000);
+  }
+
+  /**
+   * Returns the active geocoding provider.
+   */
+  getProvider(): GeocodingProvider {
+    return this.provider;
   }
 
   /**
@@ -106,7 +115,18 @@ export class GeocodingService {
       .join(', ');
   }
 
+  private async enforceRateLimit(): Promise<void> {
+    const now = Date.now();
+    const elapsed = now - this.lastNominatimRequestTime;
+    if (elapsed < this.minNominatimDelayMs) {
+      await new Promise((resolve) => setTimeout(resolve, this.minNominatimDelayMs - elapsed));
+    }
+    this.lastNominatimRequestTime = Date.now();
+  }
+
   private async geocodeWithNominatim(query: string): Promise<GeocodeResult | null> {
+    await this.enforceRateLimit();
+
     const url = new URL('/search', this.nominatimBaseUrl);
     url.searchParams.set('q', query);
     url.searchParams.set('format', 'json');
