@@ -85,6 +85,7 @@ export class CleanupService {
     results.push(await this.cleanOldLoginHistory(now));
     results.push(await this.cleanOldSearchAnalytics(now));
     results.push(await this.cleanOldSearchHistory(now));
+    results.push(await this.cleanOldActivityLogs(now));
 
     const summary: CleanupSummary = {
       ranAt: now.toISOString(),
@@ -313,5 +314,39 @@ export class CleanupService {
       `cleanOldSearchHistory: removed ${deleted} record(s) (retention: ${retentionDays}d)`,
     );
     return { entity: 'SearchHistory', deleted, durationMs: Date.now() - start };
+  }
+
+  private async cleanOldActivityLogs(now: Date): Promise<CleanupResult> {
+    const start = Date.now();
+    const retentionDays = parseInt(
+      process.env.CLEANUP_ACTIVITY_LOG_RETENTION_DAYS ?? '90',
+      10,
+    );
+
+    const cutoff = new Date(now.getTime() - retentionDays * 24 * 60 * 60 * 1000);
+    let deleted = 0;
+
+    let batch: number;
+    do {
+      const ids = await this.prisma.activityLog.findMany({
+        where: { timestamp: { lt: cutoff } },
+        select: { id: true },
+        take: BATCH_SIZE,
+      });
+
+      if (ids.length === 0) break;
+
+      const result = await this.prisma.activityLog.deleteMany({
+        where: { id: { in: ids.map((r) => r.id) } },
+      });
+
+      batch = result.count;
+      deleted += batch;
+    } while (batch === BATCH_SIZE);
+
+    this.logger.log(
+      `cleanOldActivityLogs: removed ${deleted} record(s) (retention: ${retentionDays}d)`,
+    );
+    return { entity: 'ActivityLog', deleted, durationMs: Date.now() - start };
   }
 }
