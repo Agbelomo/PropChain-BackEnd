@@ -29,9 +29,14 @@ import { getRedisConfig } from '../cache/cache.config';
  * heartbeat. If a pod crashes, entries expire automatically. A per-minute
  * cron sweep in RedisPresenceService handles any edge-case orphans.
  */
+const corsOrigins = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',').map((origin) => origin.trim())
+  : ['http://localhost:3000'];
+
 @WebSocketGateway({
   cors: {
-    origin: '*',
+    origin: corsOrigins,
+    credentials: true,
   },
   namespace: 'notifications',
 })
