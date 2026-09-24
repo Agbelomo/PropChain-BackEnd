@@ -1,8 +1,7 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, Inject, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { promises as fs } from 'fs';
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-import { join } from 'path';
+import { CacheService } from '../cache/cache.service';
 
 export interface SmsResult {
   success: boolean;
@@ -233,7 +232,7 @@ interface RateLimitEntry {
 }
 
 // ---------------------------------------------------------------------------
-// SMS Service (enhanced)
+// SMS Service (enhanced with distributed Redis rate-limit + opt-out)
 // ---------------------------------------------------------------------------
 
 @Injectable()
@@ -248,6 +247,7 @@ export class SmsService {
   constructor(
     private readonly smsProviderFactory: SmsProviderFactory,
     private readonly configService: ConfigService,
+    @Optional() @Inject(CacheService) private readonly cacheService?: CacheService,
   ) {
     this.optOutStoragePath = this.configService.get<string>(
       'SMS_OPTOUT_STORAGE',
@@ -261,18 +261,18 @@ export class SmsService {
     if (!this.validatePhoneNumber(normalized)) {
       throw new BadRequestException(`Invalid phone number: ${to}`);
     }
-    if (this.isOptedOut(normalized)) {
+    if (await this.isOptedOutAsync(normalized)) {
       this.logger.warn(`SMS skipped: ${normalized} has opted out`);
       return { success: false, error: 'Phone number has opted out of SMS' };
     }
-    if (!this.checkRateLimit(normalized)) {
+    if (!(await this.checkRateLimitAsync(normalized))) {
       this.logger.warn(`SMS rate limited for ${normalized}`);
       return { success: false, error: 'Rate limit exceeded (max 10 SMS per minute)' };
     }
 
     const result = await this.smsProviderFactory.getProvider().send(normalized, message);
     if (result.success) {
-      this.recordSend(normalized);
+      await this.recordSendAsync(normalized);
     }
     return result;
   }
@@ -294,6 +294,9 @@ export class SmsService {
   async handleOptOut(phone: string): Promise<void> {
     const normalized = this.normalizePhone(phone);
     this.optedOutPhones.add(normalized);
+    if (this.cacheService) {
+      await this.cacheService.set(`sms:optout:${normalized}`, true, 30 * 24 * 3600);
+    }
     await this.persistOptOutList();
     this.logger.log(`Phone ${normalized} opted out of SMS`);
   }
@@ -305,9 +308,37 @@ export class SmsService {
     return this.optedOutPhones.has(this.normalizePhone(phone));
   }
 
+  async isOptedOutAsync(phone: string): Promise<boolean> {
+    const normalized = this.normalizePhone(phone);
+    if (this.optedOutPhones.has(normalized)) return true;
+    if (this.cacheService) {
+      const cached = await this.cacheService.get<boolean>(`sms:optout:${normalized}`);
+      if (cached) return true;
+    }
+    return false;
+  }
+
   // ---------------------------------------------------------------------------
-  // Rate limiting
+  // Distributed Rate limiting via CacheService / Redis
   // ---------------------------------------------------------------------------
+
+  private async checkRateLimitAsync(phone: string): Promise<boolean> {
+    if (this.cacheService) {
+      const key = `sms:ratelimit:${phone}`;
+      const count = (await this.cacheService.get<number>(key)) || 0;
+      return count < this.maxPerMinute;
+    }
+    return this.checkRateLimit(phone);
+  }
+
+  private async recordSendAsync(phone: string): Promise<void> {
+    if (this.cacheService) {
+      const key = `sms:ratelimit:${phone}`;
+      const count = (await this.cacheService.get<number>(key)) || 0;
+      await this.cacheService.set(key, count + 1, 60);
+    }
+    this.recordSend(phone);
+  }
 
   private checkRateLimit(phone: string): boolean {
     const now = Date.now();
