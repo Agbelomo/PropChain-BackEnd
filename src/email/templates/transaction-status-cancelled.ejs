@@ -1,6 +1,6 @@
 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-  <h2 style="color: #d9534f;">Transaction Cancelled</h2>
-  <p>Your transaction has been cancelled.</p>
+  <h2 style="color: #d9534f;"><%= t.transaction_cancelled_title %></h2>
+  <p><%= t.transaction_cancelled_body %></p>
   <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
     <p><strong>Transaction ID:</strong> <%= transactionId %></p>
     <p><strong>Property:</strong> <%= propertyTitle %></p>
@@ -9,8 +9,9 @@
     <% if (cancellationReason) { %>
     <p><strong>Reason:</strong> <%= cancellationReason %></p>
     <% } %>
+    <% if (cancelledDate) { %>
     <p><strong>Cancelled Date:</strong> <%= cancelledDate %></p>
+    <% } %>
   </div>
-  <p>If you have any questions about this cancellation, please contact our support team.</p>
-  <p>Best regards,<br>The PropChain Team</p>
+  <p><%= t.regards %><br><%= t.team %></p>
 </div>

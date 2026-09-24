@@ -30,7 +30,9 @@
     "db:generate": "prisma generate",
     "db:studio": "prisma studio",
     "seed": "ts-node prisma/seed.ts",
-    "prepare": "husky"
+    "prepare": "husky",
+    "test:i18n-symmetry": "jest src/i18n/translations.symmetry.spec.ts --runInBand",
+    "check:i18n": "npm run test:i18n-symmetry"
   },
   "lint-staged": {
     "*.ts": [
