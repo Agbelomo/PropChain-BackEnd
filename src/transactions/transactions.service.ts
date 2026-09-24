@@ -78,20 +78,43 @@ export class TransactionsService {
 
     const feeBreakdown = this.transactionFeesService.calculateFees(Number(dto.amount));
 
-    const transaction = await this.prisma.transaction.create({
-      data: {
-        propertyId: dto.propertyId,
-        buyerId: dto.buyerId,
-        sellerId: dto.sellerId,
-        amount: dto.amount,
-        type: dto.type as unknown as TransactionType,
-        status: 'PENDING',
-        notes: dto.notes,
-        feeBreakdown: feeBreakdown as unknown as Prisma.InputJsonValue,
-      },
+    const transaction = await this.prisma.$transaction(async (tx) => {
+      const createdTx = await tx.transaction.create({
+        data: {
+          propertyId: dto.propertyId,
+          buyerId: dto.buyerId,
+          sellerId: dto.sellerId,
+          amount: dto.amount,
+          type: dto.type as unknown as TransactionType,
+          status: 'PENDING',
+          notes: dto.notes,
+          feeBreakdown: feeBreakdown as unknown as Prisma.InputJsonValue,
+        },
+      });
+
+      await this.commissionsService.createCommissionsForTransaction(createdTx.id);
+      return createdTx;
     });
 
-    await this.commissionsService.createCommissionsForTransaction(transaction.id);
+    if (process.env.BLOCKCHAIN_ENABLED !== 'false') {
+      try {
+        const buyerAddr = buyer.phone || '0x0000000000000000000000000000000000000000';
+        const sellerAddr = seller.phone || '0x0000000000000000000000000000000000000000';
+        const hash = this.blockchainService.generateBlockchainHash({
+          transactionId: transaction.id,
+          propertyId: dto.propertyId,
+          buyerAddress: buyerAddr,
+          sellerAddress: sellerAddr,
+          amount: Number(dto.amount),
+        });
+        await this.prisma.transaction.update({
+          where: { id: transaction.id },
+          data: { blockchainHash: hash },
+        });
+      } catch (e) {
+        this.logger.warn(`Failed to auto-record transaction on blockchain: ${(e as Error).message}`);
+      }
+    }
 
     this.logger.log(`Transaction created: ${transaction.id}`);
     return this.toResponseDto(transaction);
@@ -190,6 +213,12 @@ export class TransactionsService {
 
     if (dto.status === TransactionStatusDto.FAILED) {
       throw new BadRequestException('FAILED is not a supported transaction status');
+    }
+
+    if (dto.status === TransactionStatusDto.COMPLETED || (dto.status as string) === 'COMPLETED') {
+      if (transaction.escrowStatus && transaction.escrowStatus !== 'RELEASED') {
+        throw new BadRequestException('Escrow must be RELEASED before completing transaction');
+      }
     }
 
     const updated = await this.prisma.transaction.update({

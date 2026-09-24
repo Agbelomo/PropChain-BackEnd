@@ -447,4 +447,73 @@ export class AdminService {
   async scanPropertyForFraud(propertyId: string, actorId: string) {
     return this.fraudService.runPropertyScan(propertyId, actorId);
   }
+
+  async listApiKeys() {
+    const keys = await this.prisma.apiKey.findMany({
+      orderBy: { createdAt: 'desc' },
+      include: {
+        user: { select: { id: true, email: true, firstName: true, lastName: true } },
+      },
+    });
+    return keys.map((key) => ({
+      id: key.id,
+      userId: key.userId,
+      user: key.user,
+      name: key.name,
+      keyPrefix: key.keyPrefix,
+      permissions: key.permissions,
+      usageCount: key.usageCount,
+      monthlyQuota: key.monthlyQuota,
+      lastUsedAt: key.lastUsedAt,
+      expiresAt: key.expiresAt,
+      revokedAt: key.revokedAt,
+      isRevoked: !!key.revokedAt,
+      createdAt: key.createdAt,
+    }));
+  }
+
+  async revokeApiKey(id: string) {
+    const key = await this.prisma.apiKey.findUnique({ where: { id } });
+    if (!key) throw new NotFoundException(`API key with ID ${id} not found`);
+    return this.prisma.apiKey.update({
+      where: { id },
+      data: { revokedAt: new Date() },
+    });
+  }
+
+  async rotateApiKey(id: string) {
+    const oldKey = await this.prisma.apiKey.findUnique({ where: { id } });
+    if (!oldKey) throw new NotFoundException(`API key with ID ${id} not found`);
+
+    const { randomBytes, createHash } = await import('crypto');
+    const newRawKey = `pk_${randomBytes(24).toString('hex')}`;
+    const newPrefix = newRawKey.slice(0, 8);
+    const newHash = createHash('sha256').update(newRawKey).digest('hex');
+
+    await this.prisma.apiKey.update({
+      where: { id },
+      data: { revokedAt: new Date() },
+    });
+
+    const newApiKey = await this.prisma.apiKey.create({
+      data: {
+        userId: oldKey.userId,
+        name: `${oldKey.name} (Rotated)`,
+        keyPrefix: newPrefix,
+        keyHash: newHash,
+        permissions: oldKey.permissions,
+        monthlyQuota: oldKey.monthlyQuota,
+        expiresAt: oldKey.expiresAt,
+      },
+    });
+
+    return {
+      revokedKeyId: id,
+      newApiKeyId: newApiKey.id,
+      rawApiKey: newRawKey,
+      keyPrefix: newPrefix,
+      name: newApiKey.name,
+      createdAt: newApiKey.createdAt,
+    };
+  }
 }

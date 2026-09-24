@@ -6,6 +6,7 @@ import { I18nService } from '../i18n/i18n.service';
 import { v4 as uuidv4 } from 'uuid';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
+import { redactEmail } from '../auth/security.utils';
 
 const UNSUBSCRIBE_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
@@ -158,7 +159,7 @@ export class EmailService {
       });
 
       this.logger.warn(
-        `Hard bounce processed for ${email}: user marked as BOUNCED, email notifications disabled`,
+        `Hard bounce processed for ${redactEmail(email)}: user marked as BOUNCED, email notifications disabled`,
       );
     } else {
       await this.prisma.user.update({
@@ -197,7 +198,7 @@ export class EmailService {
       },
     });
 
-    this.logger.warn(`Spam complaint processed for ${email}: user marked as BOUNCED`);
+    this.logger.warn(`Spam complaint processed for ${redactEmail(email)}: user marked as BOUNCED`);
   }
 
   async handleUnsubscribe(email: string): Promise<void> {
@@ -213,7 +214,7 @@ export class EmailService {
       },
     });
 
-    this.logger.log(`Unsubscribe processed for ${email}`);
+    this.logger.log(`Unsubscribe processed for ${redactEmail(email)}`);
   }
 
   async getSenderReputation() {
@@ -276,7 +277,7 @@ export class EmailService {
     if (options.userId) {
       const user = await this.prisma.user.findUnique({ where: { id: options.userId } });
       if (user && (user.isBlocked || user.emailStatus === 'INVALID')) {
-        this.logger.warn(`🚫 Skipping email to ${options.to} (User blocked or email invalid)`);
+        this.logger.warn(`🚫 Skipping email to ${redactEmail(options.to)} (User blocked or email invalid)`);
         return;
       }
     }
@@ -330,10 +331,10 @@ export class EmailService {
         },
       );
 
-      this.logger.log(`📧 Email to ${options.to} queued for subject: ${options.subject}`);
+      this.logger.log(`📧 Email to ${redactEmail(options.to)} queued for subject: ${options.subject}`);
     } catch (err: unknown) {
       const error = err instanceof Error ? err : new Error(String(err));
-      this.logger.error(`❌ Failed to queue email to ${options.to}: ${error.message}`);
+      this.logger.error(`❌ Failed to queue email to ${redactEmail(options.to)}: ${error.message}`);
       throw error;
     }
   }

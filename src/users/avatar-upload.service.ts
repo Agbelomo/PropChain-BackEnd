@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { promises as fs } from 'fs';
 import { isAbsolute, join, relative, resolve } from 'path';
 import { createHash } from 'crypto';
+import { matchesMagicBytes } from '../common/security/magic-bytes';
 
 // Multer type definition
 interface MulterFile {
@@ -160,6 +161,15 @@ export class AvatarUploadService {
     if (!allowedExtensions.includes(`.${fileExtension}`)) {
       throw new BadRequestException(
         `Invalid file extension. Allowed extensions: ${allowedExtensions.join(', ')}`,
+      );
+    }
+
+    // Content sniffing (magic bytes) - reject spoofed extensions. Multer only
+    // exposes a buffer when uploads are configured with `memoryStorage`;
+    // degrade gracefully when it does not.
+    if (file.buffer && file.buffer.length > 0 && !matchesMagicBytes(file.buffer, file.mimetype)) {
+      throw new BadRequestException(
+        `File content does not match declared type '${file.mimetype}'. Allowed: ${this.allowedMimeTypes.join(', ')}`,
       );
     }
   }

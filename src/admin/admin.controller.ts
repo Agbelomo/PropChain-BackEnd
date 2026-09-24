@@ -371,4 +371,24 @@ export class AdminController {
   async runCleanup(): Promise<ReturnType<CleanupService['performCleanup']>> {
     return this.cleanupService.performCleanup();
   }
+
+  // ── API Key Management Endpoints (Issue #1224) ─────────────────────────────
+
+  @ApiOperation({ summary: 'List API keys' })
+  @Get('api-keys')
+  listApiKeys(): ReturnType<AdminService['listApiKeys']> {
+    return this.adminService.listApiKeys();
+  }
+
+  @ApiOperation({ summary: 'Revoke an API key' })
+  @Post('api-keys/:id/revoke')
+  revokeApiKey(@Param('id') id: string): ReturnType<AdminService['revokeApiKey']> {
+    return this.adminService.revokeApiKey(id);
+  }
+
+  @ApiOperation({ summary: 'Rotate an API key' })
+  @Post('api-keys/:id/rotate')
+  rotateApiKey(@Param('id') id: string): ReturnType<AdminService['rotateApiKey']> {
+    return this.adminService.rotateApiKey(id);
+  }
 }

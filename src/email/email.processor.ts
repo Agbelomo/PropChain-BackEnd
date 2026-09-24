@@ -2,6 +2,7 @@ import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
 import { MailerService } from '@nestjs-modules/mailer';
 import { Logger } from '@nestjs/common';
+import { redactEmail } from '../auth/security.utils';
 
 interface EmailJobData {
   to: string;
@@ -20,8 +21,9 @@ export class EmailProcessor extends WorkerHost {
 
   async process(job: Job<EmailJobData, void, string>): Promise<void> {
     const { to, subject, template, context } = job.data;
+    const redactedRecipient = redactEmail(to);
 
-    this.logger.log(`Processing email job ${job.id} for ${to} with subject: ${subject}`);
+    this.logger.log(`Processing email job ${job.id} for ${redactedRecipient} with subject: ${subject}`);
 
     try {
       await this.mailerService.sendMail({
@@ -30,10 +32,10 @@ export class EmailProcessor extends WorkerHost {
         template,
         context,
       });
-      this.logger.log(`Email sent successfully to ${to}`);
+      this.logger.log(`Email sent successfully to ${redactedRecipient}`);
     } catch (err: unknown) {
       const error = err instanceof Error ? err : new Error(String(err));
-      this.logger.error(`Failed to send email to ${to}: ${error.message}`, error.stack);
+      this.logger.error(`Failed to send email to ${redactedRecipient}: ${error.message}`, error.stack);
       throw error; // BullMQ will handle retries if configured
     }
   }

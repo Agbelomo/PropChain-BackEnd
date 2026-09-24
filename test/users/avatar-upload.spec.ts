@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
+import * as fs from 'fs';
 import { AvatarUploadController } from '../../src/users/avatar-upload.controller';
 import { AvatarUploadService } from '../../src/users/avatar-upload.service';
 import { UsersService } from '../../src/users/users.service';
@@ -26,6 +27,57 @@ describe('AvatarUploadController', () => {
       await expect(service.deleteAvatar('user_123', '../../secret.txt')).rejects.toThrow(
         BadRequestException,
       );
+    });
+
+    it('should reject a spoofed image whose bytes do not match the declared MIME type', async () => {
+      const configService = {
+        get: jest.fn((key: string, defaultValue?: string | number) => defaultValue),
+      } as unknown as ConfigService;
+      const avatarService = new AvatarUploadService(configService);
+
+      const spoofed = {
+        fieldname: 'avatar',
+        originalname: 'fake.jpg',
+        encoding: '7bit',
+        mimetype: 'image/jpeg',
+        size: 12,
+        destination: './uploads/avatars',
+        filename: 'fake.jpg',
+        path: '',
+        // PDF header masquerading as a JPEG
+        buffer: Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0x25, 0x25, 0x45, 0x4f, 0x46]),
+      } as any;
+
+      await expect(avatarService.uploadAvatar('user_123', spoofed)).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('should accept an image whose bytes match the declared MIME type', async () => {
+      const configService = {
+        get: jest.fn((key: string, defaultValue?: string | number) => defaultValue),
+      } as unknown as ConfigService;
+      const avatarService = new AvatarUploadService(configService);
+
+      jest.spyOn(fs.promises, 'mkdir').mockResolvedValue(undefined);
+      jest.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
+      jest.spyOn(fs.promises, 'copyFile').mockResolvedValue(undefined);
+
+      const jpeg = {
+        fieldname: 'avatar',
+        originalname: 'real.jpg',
+        encoding: '7bit',
+        mimetype: 'image/jpeg',
+        size: 3,
+        destination: './uploads/avatars',
+        filename: 'real.jpg',
+        path: '',
+        buffer: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0xff, 0xd9]),
+      } as any;
+
+      await expect(avatarService.uploadAvatar('user_123', jpeg)).resolves.toBeDefined();
+
+      jest.restoreAllMocks();
     });
   });
 

@@ -1,6 +1,7 @@
 import { Controller, Get, HttpCode, HttpStatus } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { CacheService } from '../cache/cache.service';
+import { SignedUrlService } from '../documents/signed-url/signed-url.service';
 
 /**
  * HealthController
@@ -9,7 +10,7 @@ import { CacheService } from '../cache/cache.service';
  * Issue #925 – Add deployment health check endpoints for K8s readiness/liveness probes.
  *
  * GET /healthz  – liveness probe  (always 200 while process is running)
- * GET /readyz   – readiness probe (checks DB + Redis)
+ * GET /readyz   – readiness probe (checks DB + Redis; storage when document features are enabled)
  * GET /startupz – startup probe   (verifies DB connectivity and migration state)
  */
 @Controller()
@@ -17,6 +18,7 @@ export class HealthController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cacheService: CacheService,
+    private readonly signedUrlService: SignedUrlService,
   ) {}
 
   /**
@@ -95,6 +97,29 @@ export class HealthController {
           : { status: 'degraded', error: `HTTP ${resp.status}` };
       } catch {
         checks.blockchainRpc = { status: 'degraded', error: 'RPC unreachable' };
+      }
+    }
+
+    // Storage check (issue #1186): when document features are enabled (a
+    // signed URL provider is selected), readiness must reflect that storage
+    // is functional so a misconfigured deployment is surfaced by the probe.
+    if (process.env.SIGNED_URL_PROVIDER) {
+      try {
+        if (this.signedUrlService.isConfigured()) {
+          checks.storage = { status: 'ok' };
+        } else {
+          allOk = false;
+          checks.storage = {
+            status: 'error',
+            error: `Signed URL provider '${this.signedUrlService.activeProviderName()}' is not configured`,
+          };
+        }
+      } catch (err: unknown) {
+        allOk = false;
+        checks.storage = {
+          status: 'error',
+          error: err instanceof Error ? err.message : String(err),
+        };
       }
     }
 
