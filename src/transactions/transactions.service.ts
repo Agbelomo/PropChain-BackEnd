@@ -78,20 +78,23 @@ export class TransactionsService {
 
     const feeBreakdown = this.transactionFeesService.calculateFees(Number(dto.amount));
 
-    const transaction = await this.prisma.transaction.create({
-      data: {
-        propertyId: dto.propertyId,
-        buyerId: dto.buyerId,
-        sellerId: dto.sellerId,
-        amount: dto.amount,
-        type: dto.type as unknown as TransactionType,
-        status: 'PENDING',
-        notes: dto.notes,
-        feeBreakdown: feeBreakdown as unknown as Prisma.InputJsonValue,
-      },
-    });
+    const transaction = await this.prisma.$transaction(async (tx) => {
+      const createdTx = await tx.transaction.create({
+        data: {
+          propertyId: dto.propertyId,
+          buyerId: dto.buyerId,
+          sellerId: dto.sellerId,
+          amount: dto.amount,
+          type: dto.type as unknown as TransactionType,
+          status: 'PENDING',
+          notes: dto.notes,
+          feeBreakdown: feeBreakdown as unknown as Prisma.InputJsonValue,
+        },
+      });
 
-    await this.commissionsService.createCommissionsForTransaction(transaction.id);
+      await this.commissionsService.createCommissionsForTransaction(createdTx.id);
+      return createdTx;
+    });
 
     if (process.env.BLOCKCHAIN_ENABLED !== 'false') {
       try {
@@ -210,6 +213,12 @@ export class TransactionsService {
 
     if (dto.status === TransactionStatusDto.FAILED) {
       throw new BadRequestException('FAILED is not a supported transaction status');
+    }
+
+    if (dto.status === TransactionStatusDto.COMPLETED || (dto.status as string) === 'COMPLETED') {
+      if (transaction.escrowStatus && transaction.escrowStatus !== 'RELEASED') {
+        throw new BadRequestException('Escrow must be RELEASED before completing transaction');
+      }
     }
 
     const updated = await this.prisma.transaction.update({
