@@ -87,9 +87,31 @@ async function bootstrap() {
     next();
   });
 
-  // Issue #964 – Localize validation error messages via the I18nService.
+  // Issue #964 / #1234 – Localize validation messages using the request's
+  // Accept-Language (and optional user preference) captured by middleware
+  // into AsyncLocalStorage. exceptionFactory has no Request; the store bridges it.
   const { I18nService } = await import('./i18n/i18n.service');
+  const { getRequestLanguageContext, runWithRequestLanguage } = await import(
+    './common/request-language.store'
+  );
   const i18n = app.get(I18nService);
+
+  app.use((req: { headers: Record<string, string | string[] | undefined>; user?: { languagePreference?: string | null } }, _res: unknown, next: () => void) => {
+    const accept =
+      typeof req.headers['accept-language'] === 'string'
+        ? req.headers['accept-language']
+        : undefined;
+    const xLang =
+      typeof req.headers['x-language'] === 'string' ? req.headers['x-language'] : undefined;
+    runWithRequestLanguage(
+      {
+        acceptLanguageHeader: accept ?? null,
+        userPreference: req.user?.languagePreference ?? xLang ?? null,
+      },
+      () => next(),
+    );
+  });
+
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -99,8 +121,12 @@ async function bootstrap() {
         const messages = (errors ?? []).flatMap((err) =>
           Object.values((err as { constraints?: Record<string, string> }).constraints ?? {}),
         );
+        const langCtx = getRequestLanguageContext();
         const translated = messages.map((message) =>
-          i18n.translate(message, { acceptLanguageHeader: undefined }),
+          i18n.translate(message, {
+            acceptLanguageHeader: langCtx.acceptLanguageHeader,
+            userPreference: langCtx.userPreference,
+          }),
         );
         return new BadRequestException(
           Array.isArray(translated) && translated.length > 0 ? translated : messages,
