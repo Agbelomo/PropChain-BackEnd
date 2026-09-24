@@ -7,6 +7,7 @@ import { validatePassword } from '../auth/password.utils';
 import { ActivityLogService } from './activity-log.service';
 import { UserRole } from '../types/prisma.types';
 import { Prisma } from '@prisma/client';
+import { randomBytes } from 'crypto';
 
 interface UserImportRecord {
   email: string;
@@ -61,6 +62,14 @@ export class UserImportService {
       throw new BadRequestException('CSV file is empty');
     }
 
+    // Pre-fetch existing emails in a single query to eliminate N+1 roundtrips
+    const emailList = records.map((r) => r.email).filter(Boolean);
+    const existingUsers = await this.prisma.user.findMany({
+      where: { email: { in: emailList } },
+      select: { email: true },
+    });
+    const existingEmailSet = new Set(existingUsers.map((u) => u.email.toLowerCase()));
+
     const usersToCreate: Prisma.UserCreateInput[] = [];
 
     for (let i = 0; i < records.length; i++) {
@@ -79,15 +88,11 @@ export class UserImportService {
           throw new Error(`Invalid email format: ${email}`);
         }
 
-        // #1199 – password policy: validate against the same PASSWORD_* config
-        // used by registration, collecting every violation for this row.
         const passwordErrors = validatePassword(password, this.configService);
         if (passwordErrors.length > 0) {
           throw new Error(`Password does not meet policy: ${passwordErrors.join('; ')}`);
         }
 
-        // #1198 – role whitelist: reject privileged/unknown roles per row instead
-        // of silently coercing them.
         let normalizedRole: UserRole = UserRole.USER;
         if (role) {
           normalizedRole = role.toUpperCase() as UserRole;
@@ -100,39 +105,20 @@ export class UserImportService {
           }
         }
 
-        // Check for existing user in database
-        const existingUser = await this.prisma.user.findUnique({
-          where: { email },
-        });
-        if (existingUser) {
+        // Check pre-fetched existing users
+        if (existingEmailSet.has(email.toLowerCase())) {
           throw new Error('User with this email already exists');
         }
 
         // Check for duplicate in current CSV
-        if (usersToCreate.some((u) => u.email === email)) {
+        if (usersToCreate.some((u) => u.email.toLowerCase() === email.toLowerCase())) {
           throw new Error('Duplicate email in CSV');
         }
 
         const hashedPassword = await hashPassword(password);
 
-        // Generate unique referral code
-        let referralCode: string;
-        let isUnique = false;
-        let attempts = 0;
-
-        // Basic unique code generation
-        do {
-          referralCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-          const existingCode = await this.prisma.user.findUnique({ where: { referralCode } });
-          if (!existingCode) {
-            isUnique = true;
-          }
-          attempts++;
-        } while (!isUnique && attempts < 10);
-
-        if (!isUnique) {
-          throw new Error('Could not generate a unique referral code');
-        }
+        // Generate unpredictable referral code using crypto.randomBytes
+        const referralCode = `REF-${randomBytes(3).toString('hex').toUpperCase()}`;
 
         usersToCreate.push({
           email,
@@ -171,7 +157,6 @@ export class UserImportService {
       }
     }
 
-    // #1198 – audit the actor + import summary at the row level.
     await this.recordImportAudit(actorUser, report);
 
     return report;
@@ -202,7 +187,6 @@ export class UserImportService {
         description: `CSV user import completed (${summary})`,
       });
     } catch (error) {
-      // Audit must never fail the whole import.
       this.logger.error('Failed to write user-import audit entry', error as Error);
     }
   }

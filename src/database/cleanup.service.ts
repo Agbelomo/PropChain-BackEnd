@@ -12,6 +12,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from './prisma.service';
+import { promises as fs } from 'fs';
 
 /** Default retention periods (in days) for each record type. */
 const DEFAULT_RETENTION = {
@@ -85,7 +86,7 @@ export class CleanupService {
     results.push(await this.cleanOldLoginHistory(now));
     results.push(await this.cleanOldSearchAnalytics(now));
     results.push(await this.cleanOldSearchHistory(now));
-    results.push(await this.cleanOldActivityLogs(now));
+    results.push(await this.cleanExportJobs(now));
 
     const summary: CleanupSummary = {
       ranAt: now.toISOString(),
@@ -316,37 +317,37 @@ export class CleanupService {
     return { entity: 'SearchHistory', deleted, durationMs: Date.now() - start };
   }
 
-  private async cleanOldActivityLogs(now: Date): Promise<CleanupResult> {
+  private async cleanExportJobs(now: Date): Promise<CleanupResult> {
     const start = Date.now();
-    const retentionDays = parseInt(
-      process.env.CLEANUP_ACTIVITY_LOG_RETENTION_DAYS ?? '90',
+    const retentionHours = parseInt(
+      process.env.CLEANUP_EXPORT_JOB_RETENTION_HOURS ?? '24',
       10,
     );
-
-    const cutoff = new Date(now.getTime() - retentionDays * 24 * 60 * 60 * 1000);
+    const cutoff = new Date(now.getTime() - retentionHours * 60 * 60 * 1000);
     let deleted = 0;
 
-    let batch: number;
-    do {
-      const ids = await this.prisma.activityLog.findMany({
-        where: { timestamp: { lt: cutoff } },
-        select: { id: true },
-        take: BATCH_SIZE,
+    const oldJobs = await this.prisma.exportJob.findMany({
+      where: { createdAt: { lt: cutoff } },
+      select: { id: true, fileUrl: true },
+    });
+
+    for (const job of oldJobs) {
+      if (job.fileUrl) {
+        try {
+          await fs.unlink(job.fileUrl);
+          await fs.unlink(`${job.fileUrl}.json`).catch(() => {});
+        } catch {}
+      }
+    }
+
+    if (oldJobs.length > 0) {
+      const res = await this.prisma.exportJob.deleteMany({
+        where: { id: { in: oldJobs.map((j) => j.id) } },
       });
+      deleted = res.count;
+    }
 
-      if (ids.length === 0) break;
-
-      const result = await this.prisma.activityLog.deleteMany({
-        where: { id: { in: ids.map((r) => r.id) } },
-      });
-
-      batch = result.count;
-      deleted += batch;
-    } while (batch === BATCH_SIZE);
-
-    this.logger.log(
-      `cleanOldActivityLogs: removed ${deleted} record(s) (retention: ${retentionDays}d)`,
-    );
-    return { entity: 'ActivityLog', deleted, durationMs: Date.now() - start };
+    this.logger.log(`cleanExportJobs: removed ${deleted} record(s) (retention: ${retentionHours}h)`);
+    return { entity: 'ExportJob', deleted, durationMs: Date.now() - start };
   }
 }
