@@ -266,7 +266,8 @@ export class I18nService implements OnModuleInit {
           }
         }
       }
-      if (normalisedTag) {
+      // RFC 7231: q=0 means "not acceptable" — skip those tags.
+      if (normalisedTag && q > 0) {
         entries.push({ tag: normalisedTag, q, index });
       }
       index += 1;
@@ -274,6 +275,10 @@ export class I18nService implements OnModuleInit {
     entries.sort((a, b) => b.q - a.q || a.index - b.index);
 
     for (const entry of entries) {
+      // Wildcard * does not map to a concrete catalogue.
+      if (entry.tag === '*') {
+        continue;
+      }
       const direct = this.normalise(entry.tag);
       if (direct) {
         return direct;
