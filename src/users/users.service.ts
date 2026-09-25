@@ -23,6 +23,7 @@ import { DeactivateAccountDto, ReactivateAccountDto } from './dto/deactivation.d
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { ProfileResponseDto } from './dto/profile-response.dto';
 import { SessionsService } from '../sessions/sessions.service';
+import { userRegistrationsTotal } from '../metrics/metrics.controller';
 
 @Injectable()
 export class UsersService implements OnModuleInit {
@@ -292,6 +293,8 @@ export class UsersService implements OnModuleInit {
         },
       },
     });
+
+    userRegistrationsTotal.inc({ method: 'email' });
 
     return sanitizeUser(user);
   }

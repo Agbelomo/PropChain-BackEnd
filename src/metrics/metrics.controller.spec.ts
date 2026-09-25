@@ -22,4 +22,16 @@ describe('MetricsController', () => {
   it('should be defined', () => {
     expect(controller).toBeDefined();
   });
+
+  it('should return metrics with correct content type', async () => {
+    const mockRes = {
+      setHeader: jest.fn(),
+      end: jest.fn(),
+    } as any;
+
+    await controller.getMetrics(mockRes);
+    expect(mockRes.setHeader).toHaveBeenCalledWith('Content-Type', 'text/plain');
+    expect(mockRes.end).toHaveBeenCalled();
+  });
 });
+

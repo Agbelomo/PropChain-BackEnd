@@ -6,15 +6,19 @@ import { PrismaService } from './database/prisma.service';
 import { CacheService } from './cache/cache.service';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
+import { AppLogger } from './common/logger';
 
 /**
  * AppController
  *
  * Root-level endpoints including the comprehensive health check endpoint.
  * Issue #916 – DB health check and connection pooling diagnostics.
+ * Issue #1247 – Prevent leaking connection details and driver internals in health responses.
  */
 @Controller()
 export class AppController {
+  private readonly logger = new AppLogger(AppController.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly cacheService: CacheService,
@@ -92,9 +96,10 @@ export class AppController {
         migrationsApplied,
       };
     } catch (err: unknown) {
+      this.logger.error('Health check database error', err instanceof Error ? err.stack : String(err));
       checks.database = {
         status: 'error',
-        error: err instanceof Error ? err.message : String(err),
+        error: 'db_unreachable',
       };
     }
 
@@ -104,11 +109,12 @@ export class AppController {
       const connected = await this.cacheService.isConnected();
       checks.redis = connected
         ? { status: 'ok', latencyMs: Date.now() - redisStart }
-        : { status: 'error', error: 'Redis not connected' };
+        : { status: 'error', error: 'redis_unreachable' };
     } catch (err: unknown) {
+      this.logger.error('Health check Redis error', err instanceof Error ? err.stack : String(err));
       checks.redis = {
         status: 'error',
-        error: err instanceof Error ? err.message : String(err),
+        error: 'redis_unreachable',
       };
     }
 
@@ -128,9 +134,10 @@ export class AppController {
         delayed,
       };
     } catch (err: unknown) {
+      this.logger.error('Health check email queue error', err instanceof Error ? err.stack : String(err));
       checks.emailQueue = {
         status: 'error',
-        error: err instanceof Error ? err.message : String(err),
+        error: 'email_queue_unreachable',
       };
     }
 

@@ -268,15 +268,63 @@ export class MetricsService {
 }
 ```
 
-#### Metrics Endpoint
+#### Metrics Endpoint & Exposure Security (Issue #1249)
+
+The Prometheus `/metrics` endpoint is protected by `MetricsAuthGuard` to prevent unauthenticated scraping and resource exhaustion.
+
+##### Exposure Configuration
+
+Configure one or more of the following environment variables:
+
+| Environment Variable | Description | Example |
+|----------------------|-------------|---------|
+| `METRICS_PORT` | Binds a dedicated HTTP listener on this port exclusively for `/metrics`. Disables `/metrics` on standard API `PORT`. | `9090` |
+| `METRICS_BEARER_TOKEN` | Requires `Authorization: Bearer <token>` or `x-metrics-token: <token>` header for scraping. | `super-secret-prom-token` |
+| `METRICS_IP_ALLOWLIST` | Comma-separated list of IP addresses allowed to scrape metrics. | `10.0.0.5,127.0.0.1` |
+
+> In production (`NODE_ENV=production`), `/metrics` is strictly disabled unless `METRICS_BEARER_TOKEN`, `METRICS_IP_ALLOWLIST`, or `METRICS_PORT` is configured.
+
+##### Prometheus Scraper Configuration Example
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: 'propchain-backend'
+    scrape_interval: 15s
+    # Option 1: Dedicated METRICS_PORT
+    static_configs:
+      - targets: ['app.internal:9090']
+    # Option 2: Bearer token auth
+    bearer_token: 'super-secret-prom-token'
+    metrics_path: '/metrics'
+```
+
+#### Clamped Default-Metrics & Business Metrics (Issue #1248, #1249)
+
+##### Clamped Default-Metrics
+Standard Node.js process and runtime metrics are collected once via `prom-client.collectDefaultMetrics` without unbounded dynamic labels to avoid memory ballooning and cardinality explosion.
+
+##### Declared Business Metrics & Label Cardinality
+
+All business counters and histograms are instrumented at the service boundaries:
+
+| Metric Name | Type | Service Boundary | Labels & Cardinality | Description |
+|-------------|------|------------------|----------------------|-------------|
+| `business_user_registrations_total` | Counter | `AuthService.register`, `AuthService.googleOAuthLogin`, `UsersService.create` | `method`: `email`, `google` (Cardinality: 2) | Total number of user registrations |
+| `business_user_logins_total` | Counter | `AuthService.login`, `AuthService.googleOAuthLogin`, `AuthService.validateApiKey` | `method`: `email`, `google`, `api-key` (Cardinality: 3) | Total number of successful user logins |
+| `business_transactions_total` | Counter | `TransactionsService.create` | `type`: `SALE`, `PURCHASE`, `TRANSFER`; `status`: `PENDING`, `COMPLETED`, `CANCELLED` (Cardinality: 9) | Total real-estate transactions created |
+| `business_properties_total` | Counter | `PropertiesService.create` | None (Cardinality: 1) | Total property listings created |
+| `business_documents_total` | Counter | `DocumentsService.create` | `document_type`: Bounded by `DocumentType` enum values (Cardinality: 7) | Total documents uploaded |
+| `business_transaction_value_usd` | Histogram | `TransactionsService.create` | None (9 buckets: 50k to 5M USD) | Real-estate transaction value distribution |
+
 ```typescript
-@Controller('metrics')
+@Controller()
+@UseGuards(MetricsAuthGuard)
 export class MetricsController {
-  constructor(private metricsService: MetricsService) {}
-  
-  @Get()
-  async getMetrics(): Promise<string> {
-    return this.metricsService.getMetrics();
+  @Get('metrics')
+  async getMetrics(@Res() res: Response): Promise<void> {
+    res.setHeader('Content-Type', register.contentType);
+    res.end(await register.metrics());
   }
 }
 ```

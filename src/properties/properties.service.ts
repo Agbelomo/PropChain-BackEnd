@@ -23,6 +23,7 @@ import {
   getAllowedNextPropertyStatuses,
   DEFAULT_PROPERTY_STATUS,
 } from './property-status.constants';
+import { propertiesTotal } from '../metrics/metrics.controller';
 
 interface FindAllParams {
   skip?: number;
@@ -203,6 +204,8 @@ export class PropertiesService {
         },
       },
     });
+
+    propertiesTotal.inc();
 
     await this.fraudService.evaluatePropertyCreated(property.id);
     await this.cacheService.invalidateByTag(CACHE_TAGS.PROPERTIES);
