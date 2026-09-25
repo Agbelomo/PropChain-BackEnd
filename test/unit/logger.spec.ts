@@ -127,4 +127,45 @@ describe('AppLogger and logger utilities', () => {
       process.env.NODE_ENV = originalNodeEnv;
     });
   });
+
+  describe('PrismaService resource cleanup (issue #1250)', () => {
+    it('asserts no timer handles remain post-destroy', async () => {
+      // Import PrismaService dynamically or instantiate
+      const { PrismaService } = await import('../../src/database/prisma.service');
+      const service = new PrismaService();
+
+      jest.spyOn(service, '$connect').mockResolvedValue(undefined as any);
+      jest
+        .spyOn(Object.getPrototypeOf(Object.getPrototypeOf(service)), '$disconnect')
+        .mockResolvedValue(undefined as any);
+
+      const clearIntervalSpy = jest.spyOn(global, 'clearInterval');
+
+      await service.onModuleInit();
+      expect((service as any).poolMetricsInterval).toBeDefined();
+
+      await service.onModuleDestroy();
+      expect(clearIntervalSpy).toHaveBeenCalled();
+      expect((service as any).poolMetricsInterval).toBeUndefined();
+    });
+
+    it('asserts no timer handles remain after $disconnect', async () => {
+      const { PrismaService } = await import('../../src/database/prisma.service');
+      const service = new PrismaService();
+
+      jest.spyOn(service, '$connect').mockResolvedValue(undefined as any);
+      jest
+        .spyOn(Object.getPrototypeOf(Object.getPrototypeOf(service)), '$disconnect')
+        .mockResolvedValue(undefined as any);
+
+      const clearIntervalSpy = jest.spyOn(global, 'clearInterval');
+
+      await service.onModuleInit();
+      expect((service as any).poolMetricsInterval).toBeDefined();
+
+      await service.$disconnect();
+      expect(clearIntervalSpy).toHaveBeenCalled();
+      expect((service as any).poolMetricsInterval).toBeUndefined();
+    });
+  });
 });

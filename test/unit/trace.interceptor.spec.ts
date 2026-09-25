@@ -177,4 +177,154 @@ describe('TraceInterceptor', () => {
         error: done,
       });
   });
+
+  describe('Sampling boundaries and slow/error trace behavior (#1251)', () => {
+    const originalEnv = process.env;
+    let loggerLogSpy: jest.SpyInstance;
+    let loggerErrorSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      process.env = { ...originalEnv };
+      loggerLogSpy = jest.spyOn((interceptor as any).logger, 'log').mockImplementation(() => {});
+      loggerErrorSpy = jest.spyOn((interceptor as any).logger, 'error').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      process.env = originalEnv;
+    });
+
+    it('does not emit start or completed logs when sample rate is 0 and request is fast', (done) => {
+      process.env.TRACE_SAMPLE_RATE = '0';
+      (randomUUID as jest.Mock).mockReturnValue('unsampled-fast-trace');
+      mockCallHandler.handle = jest.fn().mockReturnValue(of({ ok: true }));
+
+      interceptor
+        .intercept(mockExecutionContext as ExecutionContext, mockCallHandler as CallHandler)
+        .subscribe({
+          next: () => {
+            expect(loggerLogSpy).not.toHaveBeenCalled();
+            expect(mockResponse.setHeader).toHaveBeenCalledWith('X-Trace-Id', 'unsampled-fast-trace');
+            done();
+          },
+          error: done,
+        });
+    });
+
+    it('always logs slow requests even when sample rate is 0', (done) => {
+      process.env.TRACE_SAMPLE_RATE = '0';
+      process.env.TRACE_SLOW_THRESHOLD_MS = '50';
+      (randomUUID as jest.Mock).mockReturnValue('slow-trace-id');
+
+      // Mock Date.now to simulate a slow request (> 50ms)
+      const realDateNow = Date.now;
+      let callCount = 0;
+      jest.spyOn(Date, 'now').mockImplementation(() => {
+        callCount++;
+        return callCount === 1 ? 1000 : 1100; // 100ms duration
+      });
+
+      mockCallHandler.handle = jest.fn().mockReturnValue(of({ slow: true }));
+
+      interceptor
+        .intercept(mockExecutionContext as ExecutionContext, mockCallHandler as CallHandler)
+        .subscribe({
+          next: () => {
+            // start log was not sampled, but completed log was emitted because duration was 100ms > 50ms
+            expect(loggerLogSpy).toHaveBeenCalledWith(
+              expect.stringContaining('[slow-trace-id] TestController.testHandler - completed (100ms)'),
+            );
+            Date.now = realDateNow;
+            done();
+          },
+          error: (err) => {
+            Date.now = realDateNow;
+            done(err);
+          },
+        });
+    });
+
+    it('always logs failed requests even when sample rate is 0', (done) => {
+      process.env.TRACE_SAMPLE_RATE = '0';
+      (randomUUID as jest.Mock).mockReturnValue('failed-trace-id');
+      const testError = new Error('Database connection failed');
+      mockCallHandler.handle = jest.fn().mockReturnValue(throwError(() => testError));
+
+      interceptor
+        .intercept(mockExecutionContext as ExecutionContext, mockCallHandler as CallHandler)
+        .subscribe({
+          next: () => done.fail('Should fail'),
+          error: () => {
+            expect(loggerErrorSpy).toHaveBeenCalledWith(
+              expect.stringContaining('[failed-trace-id] TestController.testHandler - failed'),
+            );
+            done();
+          },
+        });
+    });
+
+    it('logs both start and completed when sample rate is 1', (done) => {
+      process.env.TRACE_SAMPLE_RATE = '1';
+      (randomUUID as jest.Mock).mockReturnValue('sampled-100-trace');
+      mockCallHandler.handle = jest.fn().mockReturnValue(of({ success: true }));
+
+      interceptor
+        .intercept(mockExecutionContext as ExecutionContext, mockCallHandler as CallHandler)
+        .subscribe({
+          next: () => {
+            expect(loggerLogSpy).toHaveBeenCalledWith(
+              expect.stringContaining('[sampled-100-trace] TestController.testHandler - started'),
+            );
+            expect(loggerLogSpy).toHaveBeenCalledWith(
+              expect.stringContaining('[sampled-100-trace] TestController.testHandler - completed'),
+            );
+            done();
+          },
+          error: done,
+        });
+    });
+
+    it('correctly samples based on Math.random boundary', (done) => {
+      process.env.TRACE_SAMPLE_RATE = '0.5';
+      const randomSpy = jest.spyOn(Math, 'random');
+
+      // First request: random is 0.4 (< 0.5) -> sampled
+      randomSpy.mockReturnValueOnce(0.4);
+      (randomUUID as jest.Mock).mockReturnValueOnce('boundary-sampled');
+      mockCallHandler.handle = jest.fn().mockReturnValue(of({}));
+
+      interceptor
+        .intercept(mockExecutionContext as ExecutionContext, mockCallHandler as CallHandler)
+        .subscribe({
+          next: () => {
+            expect(loggerLogSpy).toHaveBeenCalledWith(
+              expect.stringContaining('[boundary-sampled] TestController.testHandler - started'),
+            );
+
+            loggerLogSpy.mockClear();
+
+            // Second request: random is 0.6 (>= 0.5) -> unsampled
+            randomSpy.mockReturnValueOnce(0.6);
+            (randomUUID as jest.Mock).mockReturnValueOnce('boundary-unsampled');
+
+            interceptor
+              .intercept(mockExecutionContext as ExecutionContext, mockCallHandler as CallHandler)
+              .subscribe({
+                next: () => {
+                  expect(loggerLogSpy).not.toHaveBeenCalled();
+                  randomSpy.mockRestore();
+                  done();
+                },
+                error: (err) => {
+                  randomSpy.mockRestore();
+                  done(err);
+                },
+              });
+          },
+          error: (err) => {
+            randomSpy.mockRestore();
+            done(err);
+          },
+        });
+    });
+  });
 });
