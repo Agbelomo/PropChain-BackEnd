@@ -1,16 +1,17 @@
 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-  <h2 style="color: #28a745;">Transaction Completed</h2>
-  <p>Congratulations! Your transaction has been successfully completed.</p>
+  <h2 style="color: #5cb85c;"><%= t.transaction_completed_title %></h2>
+  <p><%= t.transaction_completed_body %></p>
   <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
     <p><strong>Transaction ID:</strong> <%= transactionId %></p>
     <p><strong>Property:</strong> <%= propertyTitle %></p>
     <p><strong>Address:</strong> <%= propertyAddress %></p>
     <p><strong>Amount:</strong> <%= amount %></p>
-    <p><strong>Completion Date:</strong> <%= completionDate %></p>
+    <% if (completionDate) { %>
+    <p><strong>Completed:</strong> <%= completionDate %></p>
+    <% } %>
     <% if (blockchainTxHash) { %>
-    <p><strong>Blockchain Hash:</strong> <%= blockchainTxHash %></p>
+    <p><strong>Blockchain TX:</strong> <%= blockchainTxHash %></p>
     <% } %>
   </div>
-  <p>All documents and records have been updated. Thank you for using PropChain.</p>
-  <p>Best regards,<br>The PropChain Team</p>
+  <p><%= t.regards %><br><%= t.team %></p>
 </div>

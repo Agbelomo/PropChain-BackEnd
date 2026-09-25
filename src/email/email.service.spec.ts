@@ -56,3 +56,47 @@ describe('EmailService.handleBounce', () => {
     });
   });
 });
+
+
+describe('EmailService localization (issue #1231)', () => {
+  function buildService(i18nTranslate: jest.Mock) {
+    const prisma = {
+      user: { findUnique: jest.fn().mockResolvedValue(null) },
+    };
+    const queue = { add: jest.fn().mockResolvedValue({ id: 'q1' }) };
+    const service = new EmailService(
+      { get: jest.fn().mockReturnValue('http://localhost:3000/api') } as any,
+      prisma as any,
+      { createEmailEngagement: jest.fn() } as any,
+      {
+        translate: i18nTranslate,
+        tFor: i18nTranslate,
+        resolveLanguage: jest.fn().mockReturnValue('es'),
+      } as any,
+      queue as any,
+    );
+    return { service, queue };
+  }
+
+  it('injects context.t with Spanish strings when language=es', async () => {
+    const i18nTranslate = jest.fn((key: string) => {
+      if (key === 'email.password_reset_title') return 'Solicitud de restablecimiento de contraseña';
+      if (key === 'email.password_reset_subject') return 'Restablecimiento de contraseña - PropChain';
+      return key;
+    });
+    const { service, queue } = buildService(i18nTranslate);
+    await service.sendEmail({
+      to: 'user@example.com',
+      subject: 'Password Reset - PropChain',
+      template: 'password-reset',
+      context: { resetUrl: 'https://example.com/reset' },
+      language: 'es',
+    });
+    expect(queue.add).toHaveBeenCalled();
+    const payload = queue.add.mock.calls[0][1];
+    expect(payload.context.t).toBeDefined();
+    expect(payload.context.language).toBe('es');
+    expect(payload.context.t.password_reset_title).toBe('Solicitud de restablecimiento de contraseña');
+  });
+});
+

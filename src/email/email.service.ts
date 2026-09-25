@@ -260,16 +260,27 @@ export class EmailService {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const html = options.html;
 
-    if (options.language && options.template) {
-      const lang = options.language;
-      const i18nKey = `email.${options.template}`;
-      const translated = this.i18nService.translate(
-        i18nKey,
-        { userPreference: lang },
-        options.context,
-      );
-      if (translated !== i18nKey) {
-        options.subject = options.subject || translated;
+    // Issue #1231 – resolve i18n strings for the requested language into context.t
+    // so EJS templates render localized copy instead of hard-coded English.
+    const lang =
+      options.language === 'es' || options.language === 'en'
+        ? options.language
+        : this.i18nService.resolveLanguage({ userPreference: options.language });
+    options.language = lang;
+    const t = this.buildEmailTranslations(lang, options.context ?? {});
+    options.context = {
+      ...(options.context ?? {}),
+      t,
+      language: lang,
+    };
+    if (options.template && (!options.subject || options.subject.startsWith('['))) {
+      // Prefer catalogue subject when available
+      const subjectKey = this.subjectKeyForTemplate(options.template, options.context);
+      if (subjectKey) {
+        const subject = this.i18nService.tFor(subjectKey, lang as 'en' | 'es', options.context as any);
+        if (subject !== subjectKey) {
+          options.subject = subject;
+        }
       }
     }
 
@@ -366,4 +377,72 @@ export class EmailService {
       language,
     });
   }
+  /**
+   * Build a flat map of email.* strings for the given language so templates
+   * can render via <%= t.password_reset_title %> etc. (issue #1231).
+   */
+  private buildEmailTranslations(
+    lang: string,
+    params: Record<string, unknown>,
+  ): Record<string, string> {
+    const supported = lang === 'es' ? 'es' : 'en';
+    const keys = [
+      'password_reset_subject',
+      'password_reset_title',
+      'password_reset_body',
+      'password_reset_cta',
+      'password_reset_ignore',
+      'password_reset_expiry',
+      'account_locked_subject',
+      'account_locked_title',
+      'account_locked_body',
+      'account_locked_duration',
+      'account_locked_advice',
+      'fraud_alert_subject',
+      'fraud_alert_title',
+      'fraud_alert_summary',
+      'transaction_status_subject',
+      'transaction_pending_title',
+      'transaction_pending_body',
+      'transaction_completed_title',
+      'transaction_completed_body',
+      'transaction_cancelled_title',
+      'transaction_cancelled_body',
+      'data_export_ready_subject',
+      'data_export_ready_greeting',
+      'data_export_ready_body',
+      'data_export_ready_security',
+      'data_export_failed_subject',
+      'data_export_failed_body',
+      'regards',
+      'team',
+    ];
+    const out: Record<string, string> = {};
+    const interpolateParams: Record<string, string | number> = {};
+    for (const [k, v] of Object.entries(params)) {
+      if (typeof v === 'string' || typeof v === 'number') {
+        interpolateParams[k] = v;
+      }
+    }
+    for (const key of keys) {
+      out[key] = this.i18nService.tFor(`email.${key}`, supported, interpolateParams);
+    }
+    return out;
+  }
+
+  private subjectKeyForTemplate(
+    template: string,
+    context: Record<string, unknown>,
+  ): string | null {
+    const map: Record<string, string> = {
+      'password-reset': 'email.password_reset_subject',
+      'account-locked': 'email.account_locked_subject',
+      'fraud-alert': 'email.fraud_alert_subject',
+      'transaction-status-pending': 'email.transaction_status_subject',
+      'transaction-status-completed': 'email.transaction_status_subject',
+      'transaction-status-cancelled': 'email.transaction_status_subject',
+    };
+    return map[template] ?? null;
+  }
+
 }

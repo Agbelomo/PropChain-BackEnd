@@ -11,6 +11,11 @@
  *   1. caller-supplied `userPreference` (from User.languagePreference / UserPreferences.language)
  *   2. Accept-Language header (parsed per RFC 7231)
  *   3. `DEFAULT_LANGUAGE` fallback ("en")
+ *
+ * Issue #1236 – Missing keys are observable:
+ *   - rate-limited warn log
+ *   - translations_missing_total metric
+ *   - in-memory ring of recently missed keys for admin debug endpoint
  */
 
 import { Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
@@ -28,10 +33,30 @@ export interface LanguageResolutionInput {
 
 export type Catalogue = Record<string, unknown>;
 
+export interface MissedKeyEntry {
+  key: string;
+  language: string;
+  count: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
+const MAX_RECENT_MISSES = 200;
+const LOG_RATE_LIMIT_MS = 60_000; // one warn per key per minute
+
 @Injectable()
 export class I18nService implements OnModuleInit {
   private readonly logger = new Logger(I18nService.name);
   private readonly catalogues: Map<SupportedLanguage, Catalogue> = new Map();
+
+  /** Ring buffer of recently missed keys for admin debug. */
+  private readonly recentMisses = new Map<string, MissedKeyEntry>();
+
+  /** Per-key last log timestamp for rate limiting. */
+  private readonly lastLogAt = new Map<string, number>();
+
+  private missingCounter: { inc: (labels: { key: string; language: string }) => void } | null =
+    null;
 
   constructor(
     @Optional()
@@ -58,6 +83,17 @@ export class I18nService implements OnModuleInit {
         this.logger.warn(`Failed to load translations for "${lang}" from ${filePath}: ${message}`);
         this.catalogues.set(lang, {});
       }
+    }
+
+    // Lazily bind Prometheus counter if metrics module is present (avoids hard dep in unit tests).
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const metrics = require('../metrics/metrics.controller');
+      if (metrics?.translationsMissingTotal) {
+        this.missingCounter = metrics.translationsMissingTotal;
+      }
+    } catch {
+      // metrics not available in this context (e.g. isolated unit test)
     }
   }
 
@@ -94,6 +130,10 @@ export class I18nService implements OnModuleInit {
    * Low-level translate against an explicit language. Used when the caller
    * has already determined the language (e.g. i18n pipes & filters that
    * have a request-scoped language attached).
+   *
+   * Issue #1236: on total miss, emit rate-limited warn + metric and record
+   * the key for the admin debug endpoint. Still returns the raw key for
+   * graceful degradation.
    */
   tFor(key: string, lang: SupportedLanguage, params?: Record<string, string | number>): string {
     const catalogue = this.catalogues.get(lang) ?? this.catalogues.get(DEFAULT_LANGUAGE) ?? {};
@@ -107,13 +147,79 @@ export class I18nService implements OnModuleInit {
           return this.interpolate(fallbackValue, params);
         }
       }
+      this.recordMiss(key, lang);
       return key;
     }
     return this.interpolate(value, params);
   }
 
+  /**
+   * Admin debug: list recently missed translation keys (most recent first).
+   */
+  getRecentMisses(): MissedKeyEntry[] {
+    return Array.from(this.recentMisses.values()).sort(
+      (a, b) => new Date(b.lastSeenAt).getTime() - new Date(a.lastSeenAt).getTime(),
+    );
+  }
+
+  /**
+   * Clear the in-memory miss ring (useful for tests / after catalogue deploy).
+   */
+  clearRecentMisses(): void {
+    this.recentMisses.clear();
+    this.lastLogAt.clear();
+  }
+
   hasLanguage(lang: string): lang is SupportedLanguage {
     return SUPPORTED_LANGUAGES.includes(lang as SupportedLanguage);
+  }
+
+  private recordMiss(key: string, lang: SupportedLanguage): void {
+    const now = new Date();
+    const mapKey = `${lang}:${key}`;
+    const existing = this.recentMisses.get(mapKey);
+    if (existing) {
+      existing.count += 1;
+      existing.lastSeenAt = now.toISOString();
+    } else {
+      if (this.recentMisses.size >= MAX_RECENT_MISSES) {
+        // Drop oldest by lastSeenAt
+        let oldestKey: string | null = null;
+        let oldestTs = Infinity;
+        for (const [k, v] of this.recentMisses) {
+          const ts = new Date(v.lastSeenAt).getTime();
+          if (ts < oldestTs) {
+            oldestTs = ts;
+            oldestKey = k;
+          }
+        }
+        if (oldestKey) {
+          this.recentMisses.delete(oldestKey);
+        }
+      }
+      this.recentMisses.set(mapKey, {
+        key,
+        language: lang,
+        count: 1,
+        firstSeenAt: now.toISOString(),
+        lastSeenAt: now.toISOString(),
+      });
+    }
+
+    // Rate-limited warn (once per key per minute)
+    const last = this.lastLogAt.get(mapKey) ?? 0;
+    const ts = now.getTime();
+    if (ts - last >= LOG_RATE_LIMIT_MS) {
+      this.lastLogAt.set(mapKey, ts);
+      this.logger.warn(`Missing translation key "${key}" for language "${lang}"`);
+    }
+
+    // Metric (best-effort)
+    try {
+      this.missingCounter?.inc({ key, language: lang });
+    } catch {
+      // ignore metric errors
+    }
   }
 
   private normalise(value: string | null | undefined): SupportedLanguage | null {

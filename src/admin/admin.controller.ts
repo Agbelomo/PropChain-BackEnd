@@ -46,6 +46,7 @@ import { AdminAuditInterceptor } from './admin-audit.interceptor';
 import { ArchiveService } from '../archive/archive.service';
 // Issue #920 – Cleanup service
 import { CleanupService } from '../database/cleanup.service';
+import { I18nService } from '../i18n/i18n.service';
 
 @ApiTags('Admin')
 @ApiBearerAuth('access-token')
@@ -59,6 +60,7 @@ export class AdminController {
     private readonly emailService: EmailService,
     private readonly archiveService: ArchiveService,
     private readonly cleanupService: CleanupService,
+    private readonly i18nService: I18nService,
   ) {}
 
   @Get('dashboard')
@@ -391,4 +393,17 @@ export class AdminController {
   rotateApiKey(@Param('id') id: string): ReturnType<AdminService['rotateApiKey']> {
     return this.adminService.rotateApiKey(id);
   }
+  /**
+   * Issue #1236 – Admin debug: list recently missed translation keys.
+   * Rate-limited in I18nService; useful for operators after deploys.
+   */
+  @Get('i18n/missing-keys')
+  @ApiOperation({ summary: 'List recently missed i18n translation keys' })
+  getMissingTranslationKeys() {
+    return {
+      misses: this.i18nService.getRecentMisses(),
+      note: 'Keys that fell back to the raw key after language + default catalogue lookup. Cleared on process restart.',
+    };
+  }
+
 }
