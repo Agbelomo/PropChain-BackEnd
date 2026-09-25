@@ -126,6 +126,7 @@ class FakePrismaService {
       this.deliveryLogs.set(id, record);
       return record;
     },
+    findUnique: async ({ where }: any) => this.deliveryLogs.get(where.id) ?? null,
     findMany: async ({ where }: any) => {
       let items = Array.from(this.deliveryLogs.values());
       if (where?.webhookId) items = items.filter((d) => d.webhookId === where.webhookId);
@@ -154,6 +155,7 @@ describe('Webhook workflow (e2e)', () => {
   let capturedRequests: { method: string; headers: http.IncomingHttpHeaders; body: string }[] = [];
 
   beforeAll(async () => {
+    process.env.WEBHOOK_DEV_ALLOWLIST = '127.0.0.1';
     fakePrisma = new FakePrismaService();
 
     const moduleRef = await Test.createTestingModule({
@@ -191,6 +193,12 @@ describe('Webhook workflow (e2e)', () => {
             const challenge = url.searchParams.get('challenge') ?? '';
             res.writeHead(200);
             res.end(JSON.stringify({ challenge }));
+          } else if (req.url?.includes('/slow-webhook')) {
+            // Slow delivery simulation
+            setTimeout(() => {
+              res.writeHead(200);
+              res.end(JSON.stringify({ received: true }));
+            }, 300);
           } else {
             // Delivery: accept the webhook
             res.writeHead(200);
@@ -295,8 +303,18 @@ describe('Webhook workflow (e2e)', () => {
     };
     await service.trigger('PROPERTY_CREATED', eventPayload);
 
-    // The receiver should have received a POST
-    const postRequest = capturedRequests.find((r) => r.method === 'POST');
+    // Wait for the asynchronous delivery to arrive at the receiver
+    const waitForRequest = async (predicate: (r: any) => boolean, timeoutMs = 2000) => {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const found = capturedRequests.find(predicate);
+        if (found) return found;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      return capturedRequests.find(predicate);
+    };
+
+    const postRequest = await waitForRequest((r) => r.method === 'POST');
     expect(postRequest).toBeDefined();
 
     // Parse the delivered body
@@ -326,6 +344,18 @@ describe('Webhook workflow (e2e)', () => {
       where: { userId: TEST_USER_ID },
     });
     const wh = webhooks[0];
+
+    const waitForDelivery = async (webhookId: string, timeoutMs = 2000) => {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const logs = await fakePrisma.webhookDeliveryLog.findMany({ where: { webhookId } });
+        if (logs.length > 0 && logs[0].status === 'SUCCESS') return logs;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      return fakePrisma.webhookDeliveryLog.findMany({ where: { webhookId } });
+    };
+
+    await waitForDelivery(wh.id);
 
     const res = await request(app.getHttpServer())
       .get(`/webhooks/${wh.id}/deliveries`)
@@ -407,5 +437,50 @@ describe('Webhook workflow (e2e)', () => {
     const sig2 = crypto.createHmac('sha256', secret).update(body).digest('hex');
 
     expect(sig1).toBe(sig2);
+  });
+
+  it('rejects registration of internal, private, and cloud metadata URLs (SSRF protection #1253)', async () => {
+    const blockedUrls = [
+      'http://169.254.169.254/latest/meta-data',
+      'http://10.0.0.1/hook',
+      'http://192.168.1.1/hook',
+      'http://172.16.0.1/hook',
+      'http://metadata.google.internal/computeMetadata/v1/',
+      'http://localhost:5432/webhook',
+    ];
+
+    for (const url of blockedUrls) {
+      await request(app.getHttpServer())
+        .post('/webhooks')
+        .set('Authorization', 'Bearer valid')
+        .send({
+          url,
+          eventTypes: ['PROPERTY_CREATED'],
+          description: 'Blocked target',
+        })
+        .expect(400);
+    }
+  });
+
+  it('returns immediately without waiting for slow webhook delivery (caller latency independence #1254)', async () => {
+    // Register a webhook pointing to the slow receiver path
+    const slowPath = '/slow-webhook';
+    await request(app.getHttpServer())
+      .post('/webhooks')
+      .set('Authorization', 'Bearer valid')
+      .send({
+        url: `http://127.0.0.1:${receiverPort}${slowPath}`,
+        eventTypes: ['PROPERTY_UPDATED'],
+        description: 'Slow receiver webhook',
+      })
+      .expect(201);
+
+    const service = app.get(WebhooksService);
+    const start = Date.now();
+    await service.trigger('PROPERTY_UPDATED', { propertyId: 'p-slow' });
+    const triggerDuration = Date.now() - start;
+
+    // Caller latency is bounded by enqueue time and returns well before the 300ms slow delivery completes
+    expect(triggerDuration).toBeLessThan(150);
   });
 });

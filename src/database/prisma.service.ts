@@ -69,6 +69,7 @@ function sleep(ms: number): Promise<void> {
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PrismaService.name);
+  private poolMetricsInterval?: ReturnType<typeof setInterval>;
 
   constructor() {
     const isPgbouncerEnabled =
@@ -174,7 +175,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
 
     try {
       const { prismaPoolActive, prismaPoolIdle } = await import('../metrics/metrics.controller');
-      setInterval(() => {
+      this.poolMetricsInterval = setInterval(() => {
         const pool = (this as unknown as Record<string, unknown>)._engine as
           | {
               connectionPool?: {
@@ -194,7 +195,19 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     }
   }
 
+  override async $disconnect(): Promise<void> {
+    if (this.poolMetricsInterval) {
+      clearInterval(this.poolMetricsInterval);
+      this.poolMetricsInterval = undefined;
+    }
+    await super.$disconnect();
+  }
+
   async onModuleDestroy(): Promise<void> {
+    if (this.poolMetricsInterval) {
+      clearInterval(this.poolMetricsInterval);
+      this.poolMetricsInterval = undefined;
+    }
     await this.$disconnect();
   }
 
