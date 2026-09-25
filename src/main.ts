@@ -169,6 +169,43 @@ async function bootstrap() {
   const port = process.env.PORT || 3000;
   await app.listen(port);
   logger.log(`PropChain API running on http://localhost:${port}`);
+
+  // Issue #1249 – Dedicated Prometheus metrics listener on METRICS_PORT
+  const metricsPortEnv = process.env.METRICS_PORT;
+  if (metricsPortEnv) {
+    const metricsPort = parseInt(metricsPortEnv, 10);
+    if (!isNaN(metricsPort) && metricsPort !== Number(port)) {
+      const http = await import('http');
+      const { register } = await import('prom-client');
+      const metricsServer = http.createServer(async (req, res) => {
+        if (req.url === '/metrics' && req.method === 'GET') {
+          const expectedToken = process.env.METRICS_BEARER_TOKEN;
+          if (expectedToken) {
+            const auth = req.headers['authorization'];
+            const token = auth?.startsWith('Bearer ')
+              ? auth.substring(7)
+              : req.headers['x-metrics-token'];
+            if (token !== expectedToken) {
+              res.writeHead(401, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ statusCode: 401, message: 'Unauthorized' }));
+              return;
+            }
+          }
+          res.writeHead(200, { 'Content-Type': register.contentType });
+          res.end(await register.metrics());
+        } else {
+          res.writeHead(404);
+          res.end();
+        }
+      });
+      metricsServer.listen(metricsPort, () => {
+        logger.log(
+          `📊 Dedicated Prometheus metrics listener running on http://localhost:${metricsPort}/metrics`,
+        );
+      });
+    }
+  }
+
   logger.log(`API Versioning enabled. Supported versions: v1, v2`);
   logger.log(`📚 Swagger UI available at http://localhost:${port}/api/docs`);
   logger.log(`📋 OpenAPI spec available at http://localhost:${port}/api/openapi.json`);

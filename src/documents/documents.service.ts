@@ -16,6 +16,7 @@ import {
   BulkDownloadDto,
   FilterDocumentsDto,
 } from './dto/document.dto';
+import { documentsTotal } from '../metrics/metrics.controller';
 
 // Auto-tag rules: map document type to default tags
 const AUTO_TAG_MAP: Record<string, string[]> = {
@@ -39,7 +40,7 @@ export class DocumentsService {
     const tags = [...new Set([...autoTags, ...(dto.tags ?? [])])];
     const category = dto.category ?? dto.documentType.toLowerCase().replace('_', '-');
 
-    return this.prisma.document.create({
+    const document = await this.prisma.document.create({
       data: {
         userId,
         propertyId: dto.propertyId,
@@ -54,6 +55,10 @@ export class DocumentsService {
         expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : null,
       },
     });
+
+    documentsTotal.inc({ document_type: String(dto.documentType) });
+
+    return document;
   }
 
   async findAll(userId: string, filter: FilterDocumentsDto | any = {}, userRole?: string) {
