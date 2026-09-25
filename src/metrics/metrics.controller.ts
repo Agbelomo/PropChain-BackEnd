@@ -114,6 +114,16 @@ export const documentsTotal = new Counter({
 });
 
 /**
+ * Missing i18n translation keys – increment when I18nService.tFor falls back to the raw key.
+ * Issue #1236.
+ */
+export const translationsMissingTotal = new Counter({
+  name: 'translations_missing_total',
+  help: 'Total number of missing translation key lookups',
+  labelNames: ['key', 'language'] as const,
+});
+
+/**
  * Transaction value histogram – track the distribution of transaction amounts.
  * Buckets are tuned for real-estate values (USD).
  */
