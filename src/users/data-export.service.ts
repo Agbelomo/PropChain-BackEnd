@@ -215,9 +215,12 @@ export class DataExportService {
       },
     });
 
-    await this.sendCompletionEmail(input.userId, filePath, language).catch((err) =>
+    // Issue #1230 – notify only after archive is durable and job is COMPLETED.
+    // Email is queued after the file write + DB update so the processor never
+    // races a missing fileUrl. jobId is included for support correlation.
+    await this.sendCompletionEmail(input.userId, job.id, filePath, language).catch((err) =>
       this.logger.error(
-        `Failed to send export-completion email: ${err instanceof Error ? err.message : String(err)}`,
+        `Failed to send export-completion email for job ${job.id}: ${err instanceof Error ? err.message : String(err)}`,
       ),
     );
 
@@ -261,6 +264,7 @@ export class DataExportService {
 
   private async sendCompletionEmail(
     userId: string,
+    jobId: string,
     filePath: string,
     language: 'en' | 'es',
   ): Promise<void> {
@@ -271,15 +275,47 @@ export class DataExportService {
     if (!user) {
       return;
     }
+
+    const name = user.firstName ?? 'there';
+    const subject = this.i18n.tFor('email.data_export_ready_subject', language);
+    const greeting = this.i18n.tFor('email.data_export_ready_greeting', language, { name });
+    const body = this.i18n.tFor('email.data_export_ready_body', language, {
+      jobId,
+      name,
+    });
+    const security = this.i18n.tFor('email.data_export_ready_security', language);
+    const regards = this.i18n.tFor('email.regards', language);
+    const team = this.i18n.tFor('email.team', language);
+
+    // Signed / short-lived download path: expose jobId so clients hit the
+    // streamExportArchive endpoint rather than a raw filesystem path.
+    const downloadHint = `/api/users/data-export/${jobId}/download`;
+
     await this.emailService.sendEmail({
       to: user.email,
-      subject: 'Your PropChain data export is ready',
-      html: `<p>Hi ${user.firstName ?? 'there'},</p>
-        <p>${this.i18n.tFor('common.unexpected_error', language).slice(0, 0) || ''}</p>
-        <p>Your data export is ready. Archive path: <code>${filePath}</code></p>
-        <p>For your security, this link is single-use and will not be re-sent.</p>`,
+      subject: subject === 'email.data_export_ready_subject' ? 'Your PropChain data export is ready' : subject,
+      html: `<p>${greeting}</p>
+        <p>${body}</p>
+        <p><a href="${downloadHint}">${downloadHint}</a></p>
+        <p><code>jobId=${jobId}</code></p>
+        <p>${security}</p>
+        <p>${regards}<br>${team}</p>`,
       userId,
       emailType: 'DATA_EXPORT_READY',
+      language,
+      context: { jobId, filePath, name },
     });
   }
+
+  /**
+   * Re-send completion email for an already COMPLETED job (issue #1230).
+   */
+  async resendCompletionEmail(jobId: string, userId: string, language?: string | null): Promise<void> {
+    const job = await this.prisma.exportJob.findUnique({ where: { id: jobId } });
+    if (!job || job.status !== 'COMPLETED' || !job.fileUrl) {
+      throw new NotFoundException(`Export job ${jobId} is not available for notification`);
+    }
+    await this.sendCompletionEmail(userId, job.id, job.fileUrl, asLang(language));
+  }
 }
+

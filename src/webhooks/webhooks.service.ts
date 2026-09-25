@@ -1,10 +1,17 @@
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+  Optional,
+} from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-import { CreateWebhookDto, UpdateWebhookDto, WebhookEventType } from './webhook.dto';
+import { CreateWebhookDto, UpdateWebhookDto } from './webhook.dto';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import * as crypto from 'crypto';
+import { validateWebhookUrl } from './url-validator.util';
 
 @Injectable()
 export class WebhooksService {
@@ -12,9 +19,37 @@ export class WebhooksService {
   private readonly MAX_ATTEMPTS = 5;
   private readonly RETRY_DELAYS_MS = [1000, 5000, 15000, 60000, 300000]; // 1s, 5s, 15s, 60s, 300s
 
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly TRIGGER_RATE_LIMIT_WINDOW_MS = 60_000;
+  private readonly TRIGGER_RATE_LIMIT_MAX = parseInt(
+    process.env.WEBHOOK_TRIGGER_RATE_LIMIT ?? '60',
+    10,
+  );
+  private readonly webhookTriggerTimestamps = new Map<string, number[]>();
+
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() @InjectQueue('webhook-delivery') private readonly webhookQueue?: Queue,
+  ) {}
+
+  /**
+   * Rate-limits trigger frequency per webhook (sliding 1-minute window).
+   */
+  isRateLimited(webhookId: string): boolean {
+    const now = Date.now();
+    const windowStart = now - this.TRIGGER_RATE_LIMIT_WINDOW_MS;
+    const timestamps = (this.webhookTriggerTimestamps.get(webhookId) ?? []).filter(
+      (t) => t > windowStart,
+    );
+    if (timestamps.length >= this.TRIGGER_RATE_LIMIT_MAX) {
+      return true;
+    }
+    timestamps.push(now);
+    this.webhookTriggerTimestamps.set(webhookId, timestamps);
+    return false;
+  }
 
   async create(userId: string, dto: CreateWebhookDto) {
+    await validateWebhookUrl(dto.url);
     const secret = crypto.randomBytes(32).toString('hex');
     const webhook = await this.prisma.webhook.create({
       data: {
@@ -45,6 +80,9 @@ export class WebhooksService {
 
   async update(id: string, userId: string, dto: UpdateWebhookDto) {
     await this.findOne(id, userId);
+    if (dto.url) {
+      await validateWebhookUrl(dto.url);
+    }
     return this.prisma.webhook.update({
       where: { id },
       data: {
@@ -93,7 +131,12 @@ export class WebhooksService {
     return { deleted: true };
   }
 
-  async trigger(eventType: string, payload: object) {
+  /**
+   * Dispatches deliveries asynchronously to the BullMQ pipeline (or background
+   * task queue) so the caller returns immediately without being blocked by
+   * delivery latency.
+   */
+  async trigger(eventType: string, payload: object): Promise<void> {
     const webhooks = await this.prisma.webhook.findMany({
       where: {
         status: 'ACTIVE',
@@ -102,12 +145,73 @@ export class WebhooksService {
     });
 
     for (const webhook of webhooks) {
-      await this.deliverWebhook(webhook, eventType, payload);
+      if (this.isRateLimited(webhook.id)) {
+        this.logger.warn(
+          `Webhook ${webhook.id} trigger rate limited (exceeded ${this.TRIGGER_RATE_LIMIT_MAX}/min)`,
+        );
+        continue;
+      }
+
+      if (this.webhookQueue) {
+        const delivery = await this.prisma.webhookDeliveryLog.create({
+          data: {
+            webhookId: webhook.id,
+            eventType,
+            payload,
+            status: 'PENDING',
+            maxAttempts: this.MAX_ATTEMPTS,
+          },
+        });
+
+        await this.webhookQueue.add(
+          'deliver-webhook',
+          {
+            deliveryId: delivery.id,
+            webhookId: webhook.id,
+            eventType,
+            payload,
+          },
+          {
+            attempts: this.MAX_ATTEMPTS,
+            backoff: {
+              type: 'exponential',
+              delay: 1000,
+            },
+            removeOnComplete: true,
+          },
+        );
+      } else {
+        // Fallback asynchronous dispatch: caller returns immediately
+        setImmediate(() => {
+          this.deliverWebhook(webhook, eventType, payload).catch((err) => {
+            this.logger.error(
+              `Asynchronous webhook delivery failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
+        });
+      }
     }
+  }
+
+  /**
+   * Worker handler called by WebhookDeliveryProcessor.
+   */
+  async processDeliveryJob(
+    deliveryId: string | undefined,
+    webhookId: string,
+    eventType: string,
+    payload: object,
+  ): Promise<void> {
+    const webhook = await this.prisma.webhook.findUnique({ where: { id: webhookId } });
+    if (!webhook || webhook.status !== 'ACTIVE') {
+      return;
+    }
+    await this.deliverWebhook(webhook, eventType, payload, deliveryId);
   }
 
   async verifyChallenge(webhookId: string, userId: string, challenge: string) {
     const webhook = await this.findOne(webhookId, userId);
+    await validateWebhookUrl(webhook.url);
     try {
       const url = new URL(webhook.url);
       url.searchParams.set('challenge', challenge);
@@ -183,6 +287,71 @@ export class WebhooksService {
     );
     return this.RETRY_DELAYS_MS[delayIndex];
   }
+      if (this.webhookQueue) {
+        await this.webhookQueue.add('deliver-webhook', {
+          deliveryId: delivery.id,
+          webhookId: delivery.webhook.id,
+          eventType: delivery.eventType,
+          payload: delivery.payload as object,
+        });
+      } else {
+        setImmediate(() => {
+          this.deliverWebhook(
+            delivery.webhook,
+            delivery.eventType,
+            delivery.payload as object,
+            delivery.id,
+          ).catch((err) => {
+            this.logger.error(
+              `Cron webhook retry failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
+        });
+      }
+    }
+  }
+
+  async deliverWebhook(
+    webhook: any,
+    eventType: string,
+    payload: object,
+    existingDeliveryId?: string,
+  ): Promise<void> {
+    let delivery: any;
+
+    if (existingDeliveryId) {
+      delivery = await this.prisma.webhookDeliveryLog.findUnique({
+        where: { id: existingDeliveryId },
+      });
+    }
+
+    if (!delivery) {
+      delivery = await this.prisma.webhookDeliveryLog.create({
+        data: {
+          webhookId: webhook.id,
+          eventType,
+          payload,
+          status: 'PENDING',
+          maxAttempts: this.MAX_ATTEMPTS,
+        },
+      });
+    }
+
+    // SSRF verification before network request
+    try {
+      await validateWebhookUrl(webhook.url);
+    } catch (ssrfError: any) {
+      const errorMessage = ssrfError instanceof Error ? ssrfError.message : String(ssrfError);
+      await this.prisma.webhookDeliveryLog.update({
+        where: { id: delivery.id },
+        data: {
+          status: 'FAILED',
+          error: `Blocked by SSRF validation: ${errorMessage}`,
+          attempts: delivery.attempts + 1,
+        },
+      });
+      return;
+    }
 
   private async deliverWebhook(
     webhook: any,
@@ -235,7 +404,7 @@ export class WebhooksService {
       const responseText = await response.text().catch(() => '');
 
       if (response.ok) {
-        delivery = await this.prisma.webhookDeliveryLog.update({
+        await this.prisma.webhookDeliveryLog.update({
           where: { id: delivery.id },
           data: {
             status: 'SUCCESS',
@@ -266,12 +435,24 @@ export class WebhooksService {
           error: errorMessage,
           responseBody: errorMessage.substring(0, 2000),
           nextRetryAt: shouldRetry ? new Date(Date.now() + delayMs) : null,
+          nextRetryAt: shouldRetry
+            ? new Date(
+                Date.now() +
+                  (this.RETRY_DELAYS_MS[nextAttempt] ||
+                    this.RETRY_DELAYS_MS[this.RETRY_DELAYS_MS.length - 1]),
+              )
+            : null,
         },
       });
 
       this.logger.warn(
         `Webhook delivery failed: ${eventType} to ${webhook.url} (attempt ${nextAttempt}/${this.MAX_ATTEMPTS})`,
       );
+
+      // When processed via BullMQ job, rethrow retryable failures so BullMQ tracks retries
+      if (existingDeliveryId && shouldRetry) {
+        throw error;
+      }
     }
   }
 

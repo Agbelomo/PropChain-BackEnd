@@ -18,11 +18,19 @@
  *   business_documents_total            – documents uploaded
  */
 
-import { Controller, Get, Res } from '@nestjs/common';
+import { Controller, Get, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { register, collectDefaultMetrics, Counter, Gauge, Histogram } from 'prom-client';
+import { MetricsAuthGuard } from './metrics-auth.guard';
 
-collectDefaultMetrics();
+// Clamp default-metrics cardinality: collect standard metrics without unbounded custom labels
+// and ensure single invocation across hot-reloads and test suites.
+if (!register.getSingleMetric('process_cpu_user_seconds_total')) {
+  collectDefaultMetrics({
+    prefix: '',
+    labels: {},
+  });
+}
 
 // ── HTTP metrics ─────────────────────────────────────────────────────────────
 
@@ -70,25 +78,35 @@ export const cacheHitRatio = new Gauge({
 // ── Business metrics ──────────────────────────────────────────────────────────
 
 /**
- * User registrations – increment via UserService on successful registration.
+ * User registrations – increment via AuthService / UserService on successful registration.
+ *
+ * Label cardinality: 2
+ *   - method: 'email' | 'google'
  */
 export const userRegistrationsTotal = new Counter({
   name: 'business_user_registrations_total',
   help: 'Total number of user registrations',
-  labelNames: ['method'] as const, // 'email' | 'google'
+  labelNames: ['method'] as const,
 });
 
 /**
- * Successful logins – increment via AuthService on successful login.
+ * Successful logins – increment via AuthService on successful login or API key validation.
+ *
+ * Label cardinality: 3
+ *   - method: 'email' | 'google' | 'api-key'
  */
 export const userLoginsTotal = new Counter({
   name: 'business_user_logins_total',
   help: 'Total number of successful user logins',
-  labelNames: ['method'] as const, // 'email' | 'google' | 'api-key'
+  labelNames: ['method'] as const,
 });
 
 /**
  * Transactions created – increment via TransactionsService.
+ *
+ * Label cardinality: 9 combinations
+ *   - type: 'SALE' | 'PURCHASE' | 'TRANSFER' (3 values)
+ *   - status: 'PENDING' | 'COMPLETED' | 'CANCELLED' (3 values)
  */
 export const transactionsTotal = new Counter({
   name: 'business_transactions_total',
@@ -98,6 +116,8 @@ export const transactionsTotal = new Counter({
 
 /**
  * Property listings created – increment via PropertiesService.
+ *
+ * Label cardinality: 1 (no labels)
  */
 export const propertiesTotal = new Counter({
   name: 'business_properties_total',
@@ -106,6 +126,9 @@ export const propertiesTotal = new Counter({
 
 /**
  * Documents uploaded – increment via DocumentsService.
+ *
+ * Label cardinality: 7 (bounded to DocumentType enum)
+ *   - document_type: 'TITLE_DEED' | 'INSPECTION_REPORT' | 'APPRAISAL' | 'CONTRACT' | 'DISCLOSURE' | 'PHOTO' | 'FLOOR_PLAN'
  */
 export const documentsTotal = new Counter({
   name: 'business_documents_total',
@@ -114,8 +137,20 @@ export const documentsTotal = new Counter({
 });
 
 /**
+ * Missing i18n translation keys – increment when I18nService.tFor falls back to the raw key.
+ * Issue #1236.
+ */
+export const translationsMissingTotal = new Counter({
+  name: 'translations_missing_total',
+  help: 'Total number of missing translation key lookups',
+  labelNames: ['key', 'language'] as const,
+});
+
+/**
  * Transaction value histogram – track the distribution of transaction amounts.
  * Buckets are tuned for real-estate values (USD).
+ *
+ * Label cardinality: none (9 histogram buckets)
  */
 export const transactionValueHistogram = new Histogram({
   name: 'business_transaction_value_usd',
@@ -124,6 +159,7 @@ export const transactionValueHistogram = new Histogram({
 });
 
 @Controller()
+@UseGuards(MetricsAuthGuard)
 export class MetricsController {
   @Get('metrics')
   async getMetrics(@Res() res: Response): Promise<void> {
@@ -131,3 +167,4 @@ export class MetricsController {
     res.end(await register.metrics());
   }
 }
+

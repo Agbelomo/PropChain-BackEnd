@@ -26,6 +26,7 @@ import {
   TransactionAnalyticsQueryDto,
   FeeBreakdown,
 } from './dto/transaction.dto';
+import { transactionsTotal, transactionValueHistogram } from '../metrics/metrics.controller';
 
 type TransactionWithFullRelations = Prisma.TransactionGetPayload<{
   include: {
@@ -95,6 +96,14 @@ export class TransactionsService {
       await this.commissionsService.createCommissionsForTransaction(createdTx.id);
       return createdTx;
     });
+
+    transactionsTotal.inc({
+      type: String(dto.type || transaction.type || 'SALE'),
+      status: String(transaction.status || 'PENDING'),
+    });
+    if (typeof dto.amount === 'number' && !isNaN(dto.amount) && dto.amount > 0) {
+      transactionValueHistogram.observe(dto.amount);
+    }
 
     if (process.env.BLOCKCHAIN_ENABLED !== 'false') {
       try {
@@ -537,6 +546,14 @@ export class TransactionsService {
     });
 
     await this.commissionsService.createCommissionsForTransaction(transaction.id);
+
+    transactionsTotal.inc({
+      type: String(dto.type || transaction.type || 'SALE'),
+      status: String(transaction.status || 'PENDING'),
+    });
+    if (typeof dto.amount === 'number' && !isNaN(dto.amount) && dto.amount > 0) {
+      transactionValueHistogram.observe(dto.amount);
+    }
 
     this.logger.log(`Transaction created via createTransaction: ${transaction.id}`);
     return transaction;

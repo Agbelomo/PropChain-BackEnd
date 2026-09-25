@@ -50,6 +50,7 @@ import { LoginRateLimitService } from './login-rate-limit.service';
 import { UserRole, UserTier } from '../types/prisma.types';
 import { FraudService } from '../fraud/fraud.service';
 import { ApiKeyAnalyticsService } from './api-key-analytics.service';
+import { userRegistrationsTotal, userLoginsTotal } from '../metrics/metrics.controller';
 
 const MIN_JWT_SECRET_LENGTH = 32;
 
@@ -204,6 +205,8 @@ export class AuthService {
         },
       },
     });
+
+    userRegistrationsTotal.inc({ method: 'email' });
 
     // Send verification email and await result
     await this.emailService
@@ -422,6 +425,7 @@ export class AuthService {
     await this.rateLimitService.recordSuccessfulAttempt(data.email, ipAddress, userAgent);
     await this.recordLoginHistory(user.id, ipAddress, userAgent);
     await this.fraudService.evaluateSuccessfulLogin(user.id, ipAddress, userAgent);
+    userLoginsTotal.inc({ method: 'email' });
     // Issue #961 — geo + device fingerprint fed into the post-login fraud
     // evaluation pipeline (velocity / impossible travel / device mismatch).
     // FraudService resolves both fields from its own injected helpers.
@@ -1171,6 +1175,7 @@ export class AuthService {
             isVerified: true,
           },
         });
+        userRegistrationsTotal.inc({ method: 'google' });
       }
     } else {
       // Sync profile fields
@@ -1185,6 +1190,7 @@ export class AuthService {
     }
 
     const tokens = await this.issueTokenPair(user);
+    userLoginsTotal.inc({ method: 'google' });
     return { user: sanitizeUser(user), ...tokens };
   }
 
@@ -1320,6 +1326,8 @@ export class AuthService {
     await this.apiKeyAnalyticsService?.recordUsage(apiKey.id).catch((err: unknown) => {
       this.logger.error(`Failed to record API key usage: ${(err as Error).message}`);
     });
+
+    userLoginsTotal.inc({ method: 'api-key' });
 
     return {
       sub: apiKey.userId,

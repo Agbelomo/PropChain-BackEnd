@@ -126,4 +126,32 @@ describe('DataExportService', () => {
       }),
     );
   });
+
+  it('sends completion email only after archive is COMPLETED and includes jobId (issue #1230)', async () => {
+    const harness = buildHarness();
+    const order: string[] = [];
+    harness.prisma.exportJob.update.mockImplementation(async (args: any) => {
+      order.push('job-updated:' + args.data.status);
+      return { id: 'job-1', ...args.data };
+    });
+    harness.email.sendEmail.mockImplementation(async () => {
+      order.push('email-sent');
+      return { id: 'msg-1' };
+    });
+    const result = await harness.service.exportPersonalData({ userId: 'user-1', language: 'en' });
+    // cleanup
+    try {
+      await fs.unlink(result.filePath);
+      await fs.unlink(`${result.filePath}.json`);
+    } catch { /* ignore */ }
+    expect(order.indexOf('job-updated:COMPLETED')).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf('email-sent')).toBeGreaterThan(order.indexOf('job-updated:COMPLETED'));
+    expect(harness.email.sendEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        emailType: 'DATA_EXPORT_READY',
+        context: expect.objectContaining({ jobId: 'job-1' }),
+      }),
+    );
+  });
+
 });
